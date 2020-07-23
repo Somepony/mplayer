@@ -1,0 +1,7 @@
+$${
+ exec(Mplayer_Songname_Data.txt);
+ if(%@&sname%!=%@&oldsname%);
+  log("&aNow playing: &c%@&sname%");
+  @&oldsname=%@&sname%;
+ endif;
+}$$

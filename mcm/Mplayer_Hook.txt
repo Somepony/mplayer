@@ -1,0 +1,12 @@
+$${
+if(@hooked);
+ unset(@hooked);
+ log("Mplayer &cunhooked");
+else
+ set(@hooked);
+ log("Mplayer &ahooked");
+endif;
+do;
+ exec(Mplayer_Songname_Display.txt);
+until(!@hooked);
+}$$
