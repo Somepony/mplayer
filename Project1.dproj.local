@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<BorlandProject>
+	<Transactions>
+    <Transaction>1899.12.30 00:00:00.000.460,=D:\Project\mplayer_d10\Unit17.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.909,D:\Project\mplayer_d10\RemoteControlWebFace.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.765,D:\Project\mplayer_d10\cJSON.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.438,D:\Project\mplayer_d10\Unit18.pas=D:\Project\mplayer_d10\AtomCleaner.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.522,=D:\Project\mplayer_d10\Unit18.pas</Transaction>
+  </Transactions>
+</BorlandProject>

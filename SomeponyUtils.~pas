@@ -1,0 +1,32 @@
+unit SomeponyUtils;
+
+interface
+
+implementation
+
+function MyTimeToStr(D:TDateTime;Msec:Boolean=False):String;
+var
+ days:Int64;
+ h:Extended;
+begin
+ if D<1 then Result:=TimeToStr(D)
+ else
+  begin
+   days:=Trunc(D);
+   D:=D-days;
+   h:=D*24;
+   if h<10 then
+    Result:=IntToStr(days) + ':0' + TimeToStr(D)
+   else
+    Result:=IntToStr(days) + ':' + TimeToStr(D);
+  end;
+ if Msec then
+  begin
+   D:=D-StrToTime(TimeToStr(D));
+   D:=D*(1000 * 60 * 60 * 24);
+   Result:=Result+'.'+Format('%.3d',[Round(D)]);
+  end;
+end;
+
+end.
+ 

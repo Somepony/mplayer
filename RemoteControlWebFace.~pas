@@ -1,0 +1,64 @@
+unit RemoteControlWebFace;
+
+interface
+
+uses IdBaseComponent, IdComponent, IdTCPServer, IdCustomHTTPServer, IdHTTPServer, Classes, MplayerAPI;
+
+type
+ MRCDummy = class
+  public
+   class procedure MainWebFaceHandler(var t:TIdPeerThread;var rq:TIdHTTPRequestInfo;var rs:TIdHTTPResponseInfo);
+ end;
+
+const
+ MRC_NAME = 'Mplayer Remote Control';
+ MRC_VERSION = '0.1';
+
+//procedure MainWebFaceHandler(var t:TIdPeerThread;var rq:TIdHTTPRequestInfo;var rs:TIdHTTPResponseInfo);
+
+implementation
+uses Unit1, Unit2, Unit12;
+
+class procedure MRCDummy.MainWebFaceHandler(var t:TIdPeerThread;var rq:TIdHTTPRequestInfo;var rs:TIdHTTPResponseInfo);
+var
+ rcmd:String;
+ procedure gsa;
+ begin
+  rs.ContentText:=GetSongArtist(CurSongNum);
+ end;
+begin
+ rs.Server:=MRC_NAME+'/'+MRC_VERSION;
+ rcmd:=rq.Document;
+ if rcmd = '/cmd/GetSongArtist' then
+  begin
+   rs.ContentText:=GetSongArtist(CurSongNum);
+   //t.Synchronize(gsa);
+  end
+ else
+  begin
+   rs.ContentText:='<!DOCTYPE HTML><html lang="ru"><head><meta charset="windows-1251"><title>Mplayer Remote Control</title></head><body><h1 style="text-align: center">Mplayer Remote Control<br>Русский текст тест</h1></body></html>';
+  end;
+
+ {if rcmd='/mplayer_remote/prev' then
+  begin
+   Form1.PrevButton;
+  end
+ else if rcmd='/mplayer_remote/pauseplay' then
+  begin
+   Form1.PausePlay;
+  end
+ else if rcmd='/mplayer_remote/stop' then
+  begin
+   Form1.StopPlaying;
+  end
+ else if rcmd='/mplayer_remote/next' then
+  begin
+   Form2.PlayNextSong;
+  end
+ else if Copy(rcmd,1,24)='/mplayer_remote/console/' then
+  begin
+   Form12.ParseCommands(Copy(rcmd,25,Length(rcmd)-24));
+  end;}
+end;
+
+end.
