@@ -1,0 +1,73 @@
+unit Unit11;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, StdCtrls, MediaInfoDLL;
+
+type
+  TForm11 = class(TForm)
+    Memo1: TMemo;
+    procedure UpdateMediaInfo;
+    procedure FormCreate(Sender: TObject);
+  private
+    procedure WMSetIcon(var Message:TWMSetIcon); message WM_SETICON;
+  public
+    { Public declarations }
+  end;
+
+var
+  Form11: TForm11;
+
+implementation
+uses Unit1;
+
+{$R *.dfm}
+
+procedure TForm11.WMSetIcon(var Message:TWMSetIcon);
+begin
+ if (csDesigning in ComponentState) or not (csDestroying in ComponentState) then
+  inherited;
+end;
+
+procedure TForm11.UpdateMediaInfo;
+var
+ ans,m_i,m_j,m_x:Cardinal;
+ output,temp_str:String;
+begin
+ if MediaInfoLoaded then
+  begin
+   ans:=MediaInfo_Open(MediaInfoHandle,PChar(MediaFilePath));
+   if ans=1 then
+    output:=MediaInfo_Inform(MediaInfoHandle,0)
+   else
+    output:='';
+   MediaInfo_Close(MediaInfoHandle);
+   Form11.Memo1.Text:=output;
+   if Form11.Memo1.Lines.Count>0 then
+    for m_i:= 0 To Form11.Memo1.Lines.Count-1 Do
+     begin
+      temp_str:=Form11.Memo1.Lines.Strings[m_i];
+       for m_j:= 1 To Length(temp_str) Do
+        if (temp_str[m_j]+temp_str[m_j+1])='  ' then
+         begin
+          for m_x:= m_j To Length(temp_str) Do
+           if temp_str[m_x]=':' then
+            begin
+             Delete(temp_str,m_j,m_x-m_j);
+             Form11.Memo1.Lines.Strings[m_i]:=temp_str;
+             Break;
+            end;
+          Break;
+         end;
+     end;
+  end;
+end;
+
+procedure TForm11.FormCreate(Sender: TObject);
+begin
+ if MediaInfoUpdateNeeded then UpdateMediaInfo;
+end;
+
+end.

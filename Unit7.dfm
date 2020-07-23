@@ -1,0 +1,33 @@
+object Form7: TForm7
+  Left = 236
+  Top = 235
+  BorderIcons = [biSystemMenu]
+  BorderStyle = bsSingle
+  Caption = #1056#1072#1079#1088#1077#1096#1077#1085#1080#1077' '#1076#1086#1089#1090#1091#1087#1072
+  ClientHeight = 337
+  ClientWidth = 673
+  Color = clBtnFace
+  Font.Charset = DEFAULT_CHARSET
+  Font.Color = clWindowText
+  Font.Height = -11
+  Font.Name = 'MS Sans Serif'
+  Font.Style = []
+  OldCreateOrder = False
+  Position = poScreenCenter
+  PixelsPerInch = 96
+  TextHeight = 13
+  object Web: TWebBrowser
+    Left = 0
+    Top = 0
+    Width = 673
+    Height = 337
+    TabOrder = 0
+    OnNavigateComplete2 = WebNavigateComplete2
+    ControlData = {
+      4C0000008E450000D42200000000000000000000000000000000000000000000
+      000000004C000000000000000000000001000000E0D057007335CF11AE690800
+      2B2E126208000000000000004C0000000114020000000000C000000000000046
+      8000000000000000000000000000000000000000000000000000000000000000
+      00000000000000000100000000000000000000000000000000000000}
+  end
+end

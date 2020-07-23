@@ -1,0 +1,80 @@
+object Form14: TForm14
+  Left = 280
+  Top = 316
+  BorderIcons = [biSystemMenu]
+  BorderStyle = bsSingle
+  Caption = #1047#1072#1087#1091#1089#1082' '#1089#1090#1086#1088#1086#1085#1085#1077#1081' '#1087#1088#1086#1075#1088#1072#1084#1084#1099
+  ClientHeight = 137
+  ClientWidth = 513
+  Color = clBtnFace
+  Font.Charset = RUSSIAN_CHARSET
+  Font.Color = clBlack
+  Font.Height = -11
+  Font.Name = 'Arial'
+  Font.Style = []
+  OldCreateOrder = False
+  Position = poScreenCenter
+  PixelsPerInch = 96
+  TextHeight = 14
+  object Label1: TLabel
+    Left = 8
+    Top = 8
+    Width = 110
+    Height = 14
+    Caption = #1055#1091#1090#1100' '#1082' '#1092#1072#1081#1083#1091' exe/bat:'
+  end
+  object Label2: TLabel
+    Left = 8
+    Top = 48
+    Width = 152
+    Height = 14
+    Caption = #1044#1086#1087#1086#1083#1085#1080#1090#1077#1083#1100#1085#1099#1077' '#1087#1072#1088#1072#1084#1077#1090#1088#1099':'
+  end
+  object Edit1: TEdit
+    Left = 8
+    Top = 24
+    Width = 425
+    Height = 22
+    ReadOnly = True
+    TabOrder = 0
+  end
+  object Button1: TButton
+    Left = 432
+    Top = 24
+    Width = 73
+    Height = 21
+    Caption = #1054#1073#1079#1086#1088'...'
+    TabOrder = 1
+    OnClick = Button1Click
+  end
+  object Button2: TButton
+    Left = 400
+    Top = 96
+    Width = 105
+    Height = 33
+    Caption = #1054#1050
+    ModalResult = 1
+    TabOrder = 2
+  end
+  object CheckBox1: TCheckBox
+    Left = 8
+    Top = 104
+    Width = 241
+    Height = 17
+    Caption = #1047#1072#1082#1088#1099#1090#1100' '#1087#1083#1072#1080#1088' '#1087#1086#1089#1083#1077' '#1079#1072#1087#1091#1089#1082#1072' '#1087#1088#1086#1075#1088#1072#1084#1084#1099
+    TabOrder = 3
+  end
+  object Edit2: TEdit
+    Left = 8
+    Top = 64
+    Width = 497
+    Height = 22
+    TabOrder = 4
+  end
+  object OpenDialog2: TOpenDialog
+    DefaultExt = '*.exe'
+    Filter = #1055#1088#1086#1075#1088#1072#1084#1084#1099'|*.exe; *.bat'
+    Left = 65512
+    Top = 65520
+  end
+end

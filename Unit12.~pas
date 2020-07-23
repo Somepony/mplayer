@@ -1,0 +1,3827 @@
+unit Unit12;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, StdCtrls, DCPsha512, ShellAPI, JvComponentBase, JvComputerInfoEx, JclSysInfo,
+  uFMOD, ExtCtrls, hashes, FuckDaRipprXM, BASS, IdBaseComponent,
+  IdComponent, IdTCPServer, IdCustomHTTPServer, IdHTTPServer, BassWASAPI,
+  AppEvnts, ComCtrls, Math, RemoteControlWebFace, UnitEnRu, VarInt, B64, cJSON, tags;
+
+type
+  TCommandHandler=procedure(SubCommand:String);
+  TExternalHandler=procedure(SubCommand:String); stdcall;
+
+  TCommand=record
+   Name:String;
+   Handler:TCommandHandler;
+   ShortDesc:String;
+   LongDesc:String;
+   ExternalProc:Boolean;
+   ExternalHandler:TExternalHandler;
+  end;
+
+  TWindowInfo=record
+   Name:String;
+   Handle:Cardinal;
+  end;
+
+  TVar=record
+   Name,Value:String;
+  end;
+
+  TStyle=record
+   Start,Length:Integer;
+   Style:TFontStyles;
+   Color:TColor;
+  end;
+
+  TStyles=array of TStyle;
+
+  TExtArr=array of array of Extended;
+
+  TCustomChannels=array of HSTREAM;
+
+  TForm12 = class(TForm)
+    Edit1: TEdit;
+    Timer1: TTimer;
+    HTTPSrv: TIdHTTPServer;
+    Timer2: TTimer;
+    AE: TApplicationEvents;
+    Memo1: TRichEdit;
+    procedure EWriteLog(Str:String);
+    procedure ERawWriteLog(Str:String);
+    procedure EWriteLogStyle(Str:String;Style:TFontStyles;Color:TColor);
+    procedure EWriteLogStyleExtended(Str:String;Styles:TStyles);
+    procedure InitCommands;
+    procedure RemakeSortedCmdList;
+    function AddCommand(Name:String;Handler:TCommandHandler;ShortDesc,LongDesc:String;ExternalProc:Boolean=False;ExternalHandler:TExternalHandler=nil):Boolean; overload;
+    function RemoveCommand(Name:String):Boolean;
+    function GetCommandID(Cmd:String):Integer;
+    function NormalizeSemicolons(RawCommand:String):String;
+    function GetRawCommandsCount(RawCommand:String):Integer;
+    function GetRawCommandPos(RawCommand:String;Num:Integer):Integer;
+    function ExtRawCommand(RawCommand:String;Num:Integer):String;
+    procedure ParseCommand(RawCommand:String;History:Boolean=False);
+    procedure ParseCommands(RawCommand:String);
+    function HistoryAlreadyExists(Cmd:String;var Pos:Byte):Boolean;
+    procedure AddHistory(Cmd:String);
+    procedure NextHistory;
+    procedure PrevHistory;
+    procedure CommandsAutorun;
+    procedure Edit1KeyPress(Sender: TObject; var Key: Char);
+    procedure FormCreate(Sender: TObject);
+    procedure Edit1KeyDown(Sender: TObject; var Key: Word;
+      Shift: TShiftState);
+    procedure Timer1Timer(Sender: TObject);
+    procedure HTTPSrvCommandGet(AThread: TIdPeerThread;
+      ARequestInfo: TIdHTTPRequestInfo;
+      AResponseInfo: TIdHTTPResponseInfo);
+    procedure Timer2Timer(Sender: TObject);
+    procedure TABCommList;
+    procedure AEMessage(var Msg: tagMSG; var Handled: Boolean);
+  private
+    procedure WMDROPFILES(var Message:TWMDROPFILES); message WM_DROPFILES;
+    procedure WMSetIcon(var Message:TWMSetIcon); message WM_SETICON;
+    function AddCommand(Cmd:TCommand):Boolean; overload;
+  public
+    { Public declarations }
+  end;
+
+  TWarmingThread=class(TThread)
+   procedure Execute; override;
+  end;
+
+const
+ CommandsBlacklist:array[0..12] of String=('test','removecmd','cmdtofile','dinfo','var','getcmdaddr','setcmdaddr','addcmd','rdinfo','riinfo','wadinfo','wasinfo','logvkapi');
+ CONSOLE_VERSION='0.1.6 - Alpha';
+
+var
+  Form12: TForm12;
+  Commands:array of TCommand;
+  Unlocked:Boolean=False;
+  SortedCmdList:TStringList;
+  CommandsHistory:array[0..19] of String;
+  HistoryLength:Byte=0;
+  HistoryPos:Byte=0;
+  ToFileFlag:Boolean=False;
+  ToFile:TStringList;
+  ToFilePath:String;
+  TimerSeconds:Int64=0;
+  TimerSeconds2:Int64=0;
+  HashingInProgress:Boolean=False;
+  RestoreWinVolFlag:Boolean=False;
+  RestoreWinVolValue:Byte;
+  WarmingThread:array of TWarmingThread;
+  Cores:Integer;
+  WarmingUp:Boolean=False;
+  WindowList:array of TWindowInfo;
+  CommandsCount:Integer;
+  TAB_mod:Boolean=False;
+  TAB_clist:array of String;
+  TAB_cur:Integer;
+  TAB_addition:String;
+  LogVKAPIToConsole:Boolean=False;
+  Vars:array of TVar;
+  JSONCardData:WideString;
+  CustomChannels:TCustomChannels;
+
+implementation
+uses Unit1, Unit2, Unit3, Unit4, UnitOSD;
+
+{$R *.dfm}
+
+function GetVarNumByName(Name:String):Integer;
+var
+ i,C:Integer;
+begin
+ Result:=-1;
+ C:=Length(Vars);
+ if C>0 then
+  for i:= 0 to C-1 do
+   if Vars[i].Name=Name then
+    begin
+     Result:=i;
+     Exit;
+    end;
+end;
+
+function AddNewVar(Name:String):Integer;
+begin
+ if GetVarNumByName(Name)<>-1 then
+  Result:=-1
+ else
+  begin
+   Result:=Length(Vars);
+   SetLength(Vars,Result+1);
+   Vars[Result].Name:=Name;
+   Vars[Result].Value:='';
+  end;
+end;
+
+function DeleteVar(Name:String):Boolean;
+var
+ num,i,c:Integer;
+begin
+ Result:=False;
+ num:=GetVarNumByName(Name);
+ if num>-1 then
+  begin
+   C:=Length(Vars);
+   for i:= num to C-2 do
+    Vars[i]:=Vars[i+1];
+   SetLength(Vars,C-1);
+   Result:=True;
+  end;
+end;
+
+function IsSchoolboy:Boolean;
+begin
+ Result:=(Screen.Width=1366) and (Screen.Height=768);
+end;
+
+function MakeLongDescStringForSetPlayDeviceCmd:String;
+var
+ c,i:Integer;
+begin
+ Result:='Сменить устройство воспроизведения (если у вас их несколько).' + #13#13 + 'Использование: setplaydevice [ID]' + #13 + 'Значения для ID:';
+ c:=Form3.ComboBox1.Items.Count;
+ if c>0 then
+  for i:= 0 To c-1 Do
+   Result:=Result + #13 + IntToStr(i) + ' - ' + Form3.ComboBox1.Items.Strings[i];
+end;
+
+procedure TWarmingThread.Execute;
+begin
+ while not Terminated do;
+end;
+
+procedure TForm12.WMSetIcon(var Message:TWMSetIcon);
+begin
+ if (csDesigning in ComponentState) or not (csDestroying in ComponentState) then
+  inherited;
+end;
+
+procedure TForm12.WMDROPFILES(var Message:TWMDROPFILES);
+var
+ Files:Longint;
+ I,L:Integer;
+ Buffer:array[0..MAX_PATH] of Char;
+begin
+ Files:=DragQueryFile(Message.Drop,$FFFFFFFF,nil,0);
+ Edit1.Text:=Trim(Edit1.Text);
+ for I := 0 to Files - 1 do
+  begin
+   DragQueryFile(Message.Drop,I,@Buffer,SizeOf(Buffer));
+   L:=Length(Edit1.Text);
+   if L>0 then
+    Edit1.Text:=Edit1.Text+' "'+Buffer+'"'
+   else
+    Edit1.Text:=Edit1.Text+'"'+Buffer+'"';
+  end;
+ DragFinish(Message.Drop);
+ Edit1.SelStart:=Length(Edit1.Text);
+ Edit1.SelLength:=0;
+end;
+
+function MyTimeToStr(D:TDateTime;Msec:Boolean=False):String;
+var
+ days:Int64;
+ h:Extended;
+begin
+ if D<1 then Result:=TimeToStr(D)
+ else
+  begin
+   days:=Trunc(D);
+   D:=D-days;
+   h:=D*24;
+   if h<10 then
+    Result:=IntToStr(days) + ':0' + TimeToStr(D)
+   else
+    Result:=IntToStr(days) + ':' + TimeToStr(D);
+  end;
+ if Msec then
+  begin
+   D:=D-StrToTime(TimeToStr(D));
+   D:=D*(1000 * 60 * 60 * 24);
+   Result:=Result+'.'+IntToStr(Round(D));
+  end;
+end;
+
+function SHA512(str:String):String;
+var
+ Digest:array[0..63] of Byte;
+ hashm:TDCP_sha512;
+ i:Byte;
+begin
+ Result:='';
+ hashm:=TDCP_sha512.Create(Form12);
+ hashm.Init;
+ hashm.UpdateStr(str);
+ hashm.Final(Digest);
+ FreeAndNil(hashm);
+ for i:= 0 To 63 Do
+  Result:=Result+IntToHex(Digest[i],2);
+end;
+
+function InCommandsBlacklist(Name:String):Boolean;
+var
+ i,L:Integer;
+begin
+ Result:=False;
+ if not Unlocked then
+  begin
+   L:=Length(CommandsBlacklist);
+   for i:= 0 To L-1 Do
+    if Name=CommandsBlacklist[i] then
+     begin
+      Result:=True;
+      Exit;
+     end;
+  end;
+end;
+
+function Normalize(Str:String):String;
+var
+ i,L:Integer;
+ IgnoreSpace:Boolean;
+begin
+ Str:=Trim(Str);
+ L:=Length(Str);
+ IgnoreSpace:=False;
+ if L>0 then
+  begin
+   i:=0;
+   repeat
+    i:=i+1;
+    if Str[i]='"' then
+     IgnoreSpace:=not IgnoreSpace;
+    if (Str[i]=' ') and (not IgnoreSpace) then
+     if Str[i+1]=' ' then
+      begin
+       Delete(Str,i,1);
+       i:=i-1;
+       L:=L-1;
+     end;
+   until i=L;
+  end;
+ Result:=Str;
+end;
+
+function Fmt(Str:String):String;
+var
+ i,L:Integer;
+begin
+ Str:=Trim(Str);
+ L:=Length(Str);
+ i:=0;
+ if L>0 then
+  repeat
+   i:=i+1;
+   if Str[i]='"' then
+    begin
+     Delete(Str,i,1);
+     i:=i-1;
+     L:=L-1;
+    end;
+  until i=L;
+ Result:=Str;
+end;
+
+function SubCommandCount(SubCommandStr:String):Integer;
+var
+ i,L:Integer;
+ IgnoreSpace:Boolean;
+begin
+ Result:=0;
+ L:=Length(SubCommandStr);
+ IgnoreSpace:=False;
+ if L>0 then
+  begin
+   Result:=1;
+   for i:= 1 To L Do
+    begin
+     if SubCommandStr[i]='"' then
+      IgnoreSpace:=not IgnoreSpace;
+     if (SubCommandStr[i]=' ') and (not IgnoreSpace) then
+      Result:=Result+1;
+    end;
+  end;
+end;
+
+function GetSubCommandPos(SubCommandStr:String;Num:Integer):Integer;
+var
+ i,L,count:Integer;
+ IgnoreSpace:Boolean;
+begin
+ count:=0;
+ Result:=0;
+ L:=Length(SubCommandStr);
+ IgnoreSpace:=False;
+ if L>0 then
+  begin
+   if Num=1 then
+    begin
+     Result:=1;
+     Exit;
+    end
+   else
+    for i:= 1 To L Do
+     begin
+      if SubCommandStr[i]='"' then
+       IgnoreSpace:=not IgnoreSpace;
+      if (SubCommandStr[i]=' ') and (not IgnoreSpace) then
+       begin
+        count:=count+1;
+        if count=Num-1 then
+         begin
+          Result:=i+1;
+          Exit;
+         end;
+       end;
+     end;
+  end;
+end;
+
+function ExtSubCommand(SubCommandStr:String;Num:Integer;LowerCased:Boolean=False):String;
+var
+ start,i,L:Integer;
+ IgnoreSpace:Boolean;
+begin
+ start:=GetSubCommandPos(SubCommandStr,Num);
+ IgnoreSpace:=False;
+ L:=Length(SubCommandStr);
+ for i:= start To L Do
+  begin
+   if SubCommandStr[i]='"' then
+    IgnoreSpace:=not IgnoreSpace;
+   if ((SubCommandStr[i]=' ') and (not IgnoreSpace)) or (i=L) then
+    begin
+     Result:=Fmt(Copy(SubCommandStr,start,i-start+1));
+     if LowerCased then Result:=AnsiLowerCase(Result);
+     Exit;
+    end;
+  end;
+end;
+
+procedure WriteLog(Str:String);
+begin
+ if ToFileFlag then ToFile.Add(Str)
+ else Form12.Memo1.Lines.Add(Str);
+end;
+
+procedure RawWriteLog(Str:String);
+var
+ tmp:TStringList;
+begin
+ tmp:=TStringList.Create;
+ tmp.Text:=Str;
+ if ToFileFlag then ToFile.AddStrings(tmp)
+ else Form12.Memo1.Lines.AddStrings(tmp);
+end;
+
+procedure WriteLogStyle(Str:String;Style:TFontStyles;Color:TColor);
+var
+ tmp,bck,nl:Integer;
+begin
+ tmp:=Form12.Memo1.SelStart;
+ WriteLog(Str);
+ if not ToFileFlag then
+  begin
+   bck:=Form12.Memo1.SelStart;
+   nl:=bck-tmp;
+   Form12.Memo1.SelStart:=tmp;
+   Form12.Memo1.SelLength:=nl;
+   Form12.Memo1.SelAttributes.Color:=Color;
+   Form12.Memo1.SelAttributes.Style:=Style;
+   Form12.Memo1.SelStart:=bck;
+   Form12.Memo1.SelLength:=0;
+  end;
+end;
+
+procedure WriteLogStyleExtended(Str:String;Styles:TStyles);
+var
+ tmp,bck,C,i:Integer;
+begin
+ Form12.Memo1.SelStart:=Length(Form12.Memo1.Text);
+ tmp:=Form12.Memo1.SelStart;
+ WriteLog(Str);
+ C:=Length(Styles);
+ if (not ToFileFlag) and (C>0) then
+  begin
+   bck:=Form12.Memo1.SelStart;
+   for i:= 0 to C-1 do
+    begin
+     if Styles[i].Start<0 then Styles[i].Start:=0;
+     if Styles[i].Length<0 then Styles[i].Length:=0;
+     Form12.Memo1.SelStart:=tmp+Styles[i].Start;
+     Form12.Memo1.SelLength:=Styles[i].Length;
+     Form12.Memo1.SelAttributes.Color:=Styles[i].Color;
+     Form12.Memo1.SelAttributes.Style:=Styles[i].Style;
+    end;
+   Form12.Memo1.SelStart:=bck;
+   Form12.Memo1.SelLength:=0;
+  end;
+end;
+
+procedure HelpHandler(SubCommand:String);
+var
+ i,C,tid:Integer;
+ tmp:String;
+ tgl:Boolean;
+begin
+ C:=SubCommandCount(SubCommand);
+ tgl:=False;
+ if C=0 then
+  begin
+   WriteLog('Список команд:');
+   for i:= 0 To Length(Commands)-1 Do
+    if not InCommandsBlacklist(SortedCmdList.Strings[i]) then
+     begin
+      tid:=Form12.GetCommandID(SortedCmdList.Strings[i]);
+      if tgl then WriteLogStyle(Commands[tid].Name + ' - ' + Commands[tid].ShortDesc,[],clGray)
+      else WriteLog(Commands[tid].Name + ' - ' + Commands[tid].ShortDesc);
+      tgl:=not tgl;
+     end
+    else
+     begin
+      if tgl then WriteLogStyle(SortedCmdList.Strings[i] + ' - [ЗАБЛОКИРОВАНО]',[],clGray)
+      else WriteLog(SortedCmdList.Strings[i] + ' - [ЗАБЛОКИРОВАНО]');
+      tgl:=not tgl;
+     end;
+   WriteLog('');
+   WriteLog('Для более подробного описания команды введите help cmd.');
+   WriteLog('Если нужно передать символы, разделённые пробелами как один параметр, заключите их в кавычки. Например: command param1 "param 2" param3');
+   WriteLog('Можно выполнить несколько команд за один раз. Для этого разделите их точкой с запятой. Например: command1 args;command2 args');
+   WriteLog('Так же можно сохранить результат выполнения команды в файл, написав после неё ">" и путь к файлу. Например: command args > C:\file.txt');
+   WriteLog('А если написать ">>", то файл не перезапишется, а результат будет просто дописан в конец файла.');
+   WriteLog('Подсказка подробного описания команд: [param] - обязательный параметр, <param> - необязательный.');
+   WriteLog('Можно установить команды на автозапуск вместе с запуском плаира. Для этого создайте файл autorun.txt в той же папке, где находится exe и запишите в него последовательность команд.');
+  end
+ else
+  begin
+   tmp:=ExtSubCommand(SubCommand,1,True);
+   tid:=Form12.GetCommandID(tmp);
+   if tid=-1 then
+    WriteLog('Команда "' + tmp + '" не существует.')
+   else if tid=-2 then
+    begin
+     WriteLog('Команда "' + tmp + '" заблокирована, так как она тебе не нужна. Для разблокировки введи пароль.');
+     WriteLog('Если ты всё же уверен, что она тебе нужна и ты точно знаешь, что хочешь сделать,');
+     WriteLog('то либо ты знаешь пароль, либо сможешь обойти блокировку и без пароля.');
+     WriteLog('Я даже дам тебе маленькую подсказку: для этого нужно изменить в памяти программы всего один бит с 0 на 1 xD');
+     WriteLog('Но вот какой именно? Дерзай ;)');
+    end
+   else
+    begin
+     WriteLog('Справка по команде "' + tmp + '":');
+     WriteLog('');
+     RawWriteLog(Commands[tid].LongDesc);
+    end;
+  end;
+end;
+
+procedure PlistHandler(SubCommand:String);
+var
+ i,C:Integer;
+ tmp:String;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C=0 then
+  begin
+   WriteLog('Описание.');
+  end
+ else
+  begin
+   if ExtSubCommand(SubCommand,1,True)='add' then
+    if C>1 then
+     begin
+      for i:= 2 To C Do
+       begin
+        tmp:=ExtSubCommand(SubCommand,i);
+        if (FileExists(tmp)) or (Copy(tmp,1,7)='http://') or (Copy(tmp,1,8)='https://') or (Copy(tmp,1,6)='ftp://') then
+         begin
+          Form2.PlaylistAddSong(tmp);
+          WriteLog('Файл добавлен в плейлист: ' + tmp);
+         end
+        else
+         WriteLog('Данного файла не существует: ' + tmp);
+       end;
+     end
+      else
+       WriteLog('Недостаточно параметров');
+  end;
+end;
+
+procedure TestHandler(SubCommand:String);
+var
+ i,C:Integer;
+ es:TStyles;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C=0 then
+  begin
+   WriteLog('Ничего.');
+  end
+ else
+  begin
+   WriteLog(IntToStr(C));
+   WriteLog('');
+   for i:= 1 To C Do
+    WriteLog('"' + ExtSubCommand(SubCommand,i) + '"');
+  end;
+ WriteLogStyle('жирный',[fsBold],clBlack);
+ WriteLogStyle('курсив',[fsItalic],clBlack);
+ WriteLogStyle('подчёркнутый',[fsUnderline],clBlack);
+ WriteLogStyle('зачёркнутый',[fsStrikeOut],clBlack);
+ WriteLogStyle('красный',[],clRed);
+ WriteLogStyle('зелёный',[],clGreen);
+ WriteLogStyle('синий',[],clBlue);
+  SetLength(es,7);
+  for i:= 0 to 6 do
+   begin
+    es[i].Start:=i;
+    es[i].Length:=1;
+    es[i].Style:=[fsBold,fsUnderline];
+   end;
+  es[0].Color:=RGB(255,0,0);
+  es[1].Color:=RGB(255,185,0);
+  es[2].Color:=RGB(255,255,0);
+  es[3].Color:=RGB(0,255,0);
+  es[4].Color:=RGB(0,255,255);
+  es[5].Color:=RGB(0,0,255);
+  es[6].Color:=RGB(178,0,255);
+ WriteLogStyleExtended('RAINBOW',es);
+end;
+
+procedure RemoveCmdHandler(SubCommand:String);
+var
+ i,C:Integer;
+ tmp:String;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>0 then
+  begin
+   for i:= 1 To C Do
+    begin
+     tmp:=ExtSubCommand(SubCommand,i,True);
+     if Form12.RemoveCommand(tmp) then
+      WriteLog('Команда "' + tmp + '" удалена.')
+     else
+      WriteLog('Команда "' + tmp + '" не существует.');
+    end;
+  end
+ else HelpHandler('removecmd');
+end;
+
+procedure HashHandler(SubCommand:String);
+type
+ HR=record
+  ET:Cardinal;
+  Hash,Path:String;
+  IsString:Boolean;
+ end;
+var
+ i,C:Integer;
+ param,HN:String;
+ HRS:array of HR;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C=0 then
+  begin
+   if not HashingInProgress then HelpHandler('hash');
+  end
+ else
+  begin
+   param:=ExtSubCommand(SubCommand,1,True);
+   if param='stop' then
+    begin
+     hashes.StopRightNow:=True;
+     HashingInProgress:=False;
+     WriteLog('Хэширование остановлено');
+    end
+   else
+    if C=1 then
+     WriteLog('Недостаточно параметров.')
+    else if not HashingInProgress then
+     begin
+      HashingInProgress:=True;
+      if param='sha512' then
+       HashingCore.ChangeHashEngine(0)
+      else if param='sha384' then
+       HashingCore.ChangeHashEngine(1)
+      else if param='sha256' then
+       HashingCore.ChangeHashEngine(2)
+      else if param='sha1' then
+       HashingCore.ChangeHashEngine(3)
+      else if param='md4' then
+       HashingCore.ChangeHashEngine(4)
+      else if param='md5' then
+       HashingCore.ChangeHashEngine(5)
+      else if param='haval' then
+       HashingCore.ChangeHashEngine(6)
+      else if param='ripemd128' then
+       HashingCore.ChangeHashEngine(7)
+      else if param='ripemd160' then
+       HashingCore.ChangeHashEngine(8)
+      else if param='tiger' then
+       HashingCore.ChangeHashEngine(9)
+      else
+       begin
+        WriteLog('Ошибка в указании алгоритма хэширования. Проверьте правильность ввода.');
+        HashingInProgress:=False;
+        Exit;
+       end;
+      HN:=HashingCore.GetHashEngineName;
+      WriteLog('Установлен алгоритм хэширования: ' + HN);
+      hashes.StopRightNow:=False;
+      for i:= 2 To C Do
+       begin
+        if hashes.StopRightNow then Exit;
+        param:=ExtSubCommand(SubCommand,i);
+        if FileExists(param) then
+         begin
+          HashingCore.HashFile(param);
+          SetLength(HRS,Length(HRS)+1);
+          HRS[Length(HRS)-1].ET:=hashes.ElapsedTime;
+          HRS[Length(HRS)-1].Hash:=hashes.Hashed;
+          HRS[Length(HRS)-1].Path:=param;
+          HRS[Length(HRS)-1].IsString:=False;
+         end
+        else
+         begin
+          SetLength(HRS,Length(HRS)+1);
+          HRS[Length(HRS)-1].ET:=0;
+          HRS[Length(HRS)-1].Hash:=HashingCore.HashString(param);
+          HRS[Length(HRS)-1].Path:=param;
+          HRS[Length(HRS)-1].IsString:=True;
+          WriteLog('Хеширование завершено!');
+         end;
+       end;
+      if Length(HRS)>0 then
+       for i:= 0 To Length(HRS)-1 Do
+        begin
+         if HRS[i].IsString then
+          begin
+           WriteLog(HN + '("' + HRS[i].Path + '") = ' + HRS[i].Hash);
+          end
+         else
+          begin
+           WriteLog(HN + '(' + HRS[i].Path + ') = ' + HRS[i].Hash);
+           WriteLog('Затраченное время: ' + IntToStr(HRS[i].ET) + ' мс');
+          end;
+        end;
+      HashingInProgress:=False;  
+     end;
+  end;
+end;
+
+procedure ExitHandler(SubCommand:String);
+begin
+ Form1.TotalTerminate;
+end;
+
+procedure CloseHandler(SubCommand:String);
+begin
+ Form12.Close;
+end;
+
+procedure RestartHandler(SubCommand:String);
+begin
+ CloseHandle(ServerMailslotHandle);
+ CloseHandle(CommandEvent);
+ ShellExecute(Application.Handle,'open',PChar(Application.ExeName),'',nil,0);
+ Form1.TotalTerminate;
+end;
+
+procedure WHvideoHandler(SubCommand:String);
+var
+ C:Integer;
+ Owid,Ohei,Dwid,Dhei,Nwid,Nhei:Integer;
+ p:Double;
+ calc:Boolean;
+ function Round2(Num:Extended):Integer;
+ var
+  tmp:Integer;
+  raw:Extended;
+ begin
+  tmp:=Round(Num);
+  if Odd(tmp) then
+   begin
+    raw:=Frac(Num);
+    if raw>=0.5 then
+     tmp:=tmp-1
+    else
+     tmp:=tmp+1;
+   end;
+  Result:=tmp;
+ end;
+ function CheckInput(Owid,Ohei,Dwid,Dhei:Integer):Boolean;
+  begin
+   Result:=True;
+   if (Owid=0) or (Ohei=0) or (Dwid=0) or (Dhei=0) then
+    begin
+     WriteLog('Проверьте входные данные');
+     Result:=False;
+    end
+   else if Odd(Owid) or Odd(Ohei) or Odd(Dwid) or Odd(Dhei) then
+    begin
+     WriteLog('Проверьте входные данные!');
+     WriteLog('Ширина или высота видео НЕ может быть нечётной');
+     Result:=False;
+    end;
+  end;
+ function IsConst(ss:String;var w,h:Integer):Boolean;
+  begin
+   Result:=False;
+   if ss='hd' then
+    begin
+     w:=1280;
+     h:=720;
+     Result:=True;
+    end
+   else if ss='fullhd' then
+    begin
+     w:=1920;
+     h:=1080;
+     Result:=True;
+    end
+   else if ss='4k' then
+    begin
+     w:=3840;
+     h:=2160;
+     Result:=True;
+    end
+   else if ss='8k' then
+    begin
+     w:=7680;
+     h:=4320;
+     Result:=True;
+    end
+   else if ss='16k' then
+    begin
+     w:=15360;
+     h:=8640;
+     Result:=True;
+    end
+  end;
+begin
+ C:=SubCommandCount(SubCommand);
+ calc:=False;
+ if C>0 then
+  begin
+   if C<2 then
+    WriteLog('Недостаточно параметров. Воспользуйтесь справкой по команде help whvideo')
+   else if C=2 then
+    begin
+     if
+      (IsConst(ExtSubCommand(SubCommand,1,True),Owid,Ohei)) and
+      (IsConst(ExtSubCommand(SubCommand,2,True),Dwid,Dhei)) then
+       calc:=True;
+    end
+   else if C=3 then
+    begin
+     if IsConst(ExtSubCommand(SubCommand,1,True),Owid,Ohei) then
+      begin
+       Dwid:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+       Dhei:=StrToIntDef(ExtSubCommand(SubCommand,3),0);
+       calc:=True;
+      end
+     else if IsConst(ExtSubCommand(SubCommand,3,True),Dwid,Dhei) then
+      begin
+       Owid:=StrToIntDef(ExtSubCommand(SubCommand,1),0);
+       Ohei:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+       calc:=True;
+      end
+     else
+      WriteLog('Недостаточно параметров. Воспользуйтесь справкой по команде help whvideo');
+    end
+   else
+    begin
+     if IsConst(ExtSubCommand(SubCommand,1,True),Owid,Ohei) then
+      begin
+       if IsConst(ExtSubCommand(SubCommand,2,True),Dwid,Dhei) then
+        calc:=True
+       else
+        begin
+         Dwid:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+         Dhei:=StrToIntDef(ExtSubCommand(SubCommand,3),0);
+         calc:=True;
+        end;
+      end
+     else
+      begin
+       Owid:=StrToIntDef(ExtSubCommand(SubCommand,1),0);
+       Ohei:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+       if IsConst(ExtSubCommand(SubCommand,3,True),Dwid,Dhei) then
+        calc:=True
+       else
+        begin
+         Dwid:=StrToIntDef(ExtSubCommand(SubCommand,3),0);
+         Dhei:=StrToIntDef(ExtSubCommand(SubCommand,4),0);
+         calc:=True;
+        end
+      end;
+    end;
+   if calc then
+    begin
+     if CheckInput(Owid,Ohei,Dwid,Dhei) then
+      begin
+       Nwid:=Dwid;
+       p:=Owid/Dwid;
+       Nhei:=Round2(Ohei/p);
+        if Odd(Nhei) then Nhei:=Nhei+1;
+       if Nhei>Dhei then
+        begin
+         Nhei:=Dhei;
+         p:=Ohei/Dhei;
+         Nwid:=Round2(Owid/p);
+        if Odd(Nwid) then Nwid:=Nwid+1;
+        end;
+       WriteLog('Подгонка разрешения ' + IntToStr(Owid) + 'x' + IntToStr(Ohei) + ' под '  + IntToStr(Dwid) + 'x' + IntToStr(Dhei) + ' по пропорциям.');
+       WriteLog('Результат: ' + IntToStr(Nwid) + 'x' + IntToStr(Nhei));
+      end;
+    end;
+  end
+ else
+  WriteLog('Подгонка размеров видео по пропорциям.');
+end;
+
+procedure TimeHandler(SubCommand:String);
+begin
+ WriteLog(DateToStr(Date) + ' ' + TimeToStr(Time));
+end;
+
+procedure SystemInfoHandler(SubCommand:String);
+var
+ tmp:TJvComputerInfoEx;
+ function BuildSSEString:String;
+ begin
+  Result:='';
+  if sse in tmp.CPU.SSE then
+   Result:=Result + 'SSE, ';
+  if sse2 in tmp.CPU.SSE then
+   Result:=Result + 'SSE2, ';
+  if sse3 in tmp.CPU.SSE then
+   Result:=Result + 'SSE3, ';
+  if ssse3 in tmp.CPU.SSE then
+   Result:=Result + 'SSSE3, ';
+  if sse41 in tmp.CPU.SSE then
+   Result:=Result + 'SSE4.1, ';
+  if sse42 in tmp.CPU.SSE then
+   Result:=Result + 'SSE4.2, ';
+  if sse4A in tmp.CPU.SSE then
+   Result:=Result + 'SSE4a, ';
+  if sse5 in tmp.CPU.SSE then
+   Result:=Result + 'SSE5, ';
+  if avx in tmp.CPU.SSE then
+   Result:=Result + 'AVX, ';
+  Delete(Result,Length(Result)-1,2);
+ end;
+begin
+ tmp:=Form1.CInfo;
+ WriteLog('Процессор:');
+ WriteLog(' Название: ' + tmp.CPU.Name);
+ WriteLog(' Производитель: ' + tmp.CPU.Manufacturer);
+ WriteLog(' Vendor ID String: ' + tmp.CPU.VendorIDString);
+ WriteLog(' Совместимость с DEP: ' + BoolToStr(tmp.CPU.DEPCapable,True));
+ WriteLog(' 3DNow!: ' + BoolToStr(tmp.CPU._3DNow,True));
+ WriteLog(' 3DNowExt: ' + BoolToStr(tmp.CPU.Ex3DNow,True));
+ WriteLog(' MMX: ' + BoolToStr(tmp.CPU.MMX,True));
+ WriteLog(' MMXEXT: ' + BoolToStr(tmp.CPU.ExMMX,True));
+ WriteLog(' SSE: ' + BuildSSEString);
+ WriteLog(' HasCacheInfo: ' + BoolToStr(tmp.CPU.HasCacheInfo,True));
+ WriteLog(' HasExtendedInfo: ' + BoolToStr(tmp.CPU.HasExtendedInfo,True));
+ WriteLog(' HasInstruction: ' + BoolToStr(tmp.CPU.HasInstruction,True));
+ WriteLog(' Hyper-Threading Technology: ' + BoolToStr(tmp.CPU.HyperThreadingTechnology,True));
+ WriteLog(' 64-bit: ' + BoolToStr(tmp.CPU.Is64Bits,True));
+ WriteLog(' FDIVOK: ' + BoolToStr(tmp.CPU.IsFDIVOK,True));
+ WriteLog(' L1 Code Cache: ' + IntToStr(tmp.CPU.L1CodeCache));
+ WriteLog(' L1 Data Cache: ' + IntToStr(tmp.CPU.L1DataCache));
+ WriteLog(' L2 Cache: ' + IntToStr(tmp.CPU.L2Cache));
+ WriteLog(' L3 Cache: ' + IntToStr(tmp.CPU.L3Cache));
+ WriteLog(' Штатная частота: ' + IntToStr(tmp.CPU.NormFreq) + ' MHz');
+ WriteLog(' Текущая частота: ' + IntToStr(tmp.CPU.RawFreq) + ' MHz');
+ WriteLog(' Степпинг: ' + IntToStr(tmp.CPU.Stepping));
+ WriteLog('');
+ WriteLog('Идентификация:');
+ WriteLog(' Домен: ' + tmp.Identification.DomainName);
+ WriteLog(' IP-Адрес: ' + tmp.Identification.IPAddress);
+ WriteLog(' Имя компьютера: ' + tmp.Identification.LocalComputerName);
+ WriteLog(' Имя пользователя: ' + tmp.Identification.LocalUserName);
+ WriteLog(' Рабочая группа: ' + tmp.Identification.LocalWorkgroup);
+ WriteLog(' Зарегистрированная компания: ' + tmp.Identification.RegisteredCompany);
+ WriteLog(' Зарегистрированный владелец: ' + tmp.Identification.RegisteredOwner);
+ WriteLog('');
+ WriteLog('Память:');
+ WriteLog(' Свободно в файле подкачки: ' + IntToStr(tmp.Memory.FreePageFileMemory) + ' bytes');
+ WriteLog(' Свободно в физической памяти: ' + IntToStr(tmp.Memory.FreePhysicalMemory) + ' bytes');
+ WriteLog(' Свободно в виртуальной памяти: ' + IntToStr(tmp.Memory.FreeVirtualMemory) + ' bytes');
+ WriteLog(' Всего в файле подкачки: ' + IntToStr(tmp.Memory.TotalPageFileMemory) + ' bytes');
+ WriteLog(' Всего физической памяти: ' + IntToStr(tmp.Memory.TotalPhysicalMemory) + ' bytes');
+ WriteLog(' Всего виртуальной памяти: ' + IntToStr(tmp.Memory.TotalVirtualMemory) + ' bytes');
+ WriteLog('');
+ WriteLog('Операционная система:');
+ WriteLog(' ОС: ' + tmp.OS.ProductName);
+ WriteLog(' Service Pack: ' + IntToStr(tmp.OS.ServicePackVersion));
+ WriteLog(' Build: ' + IntToStr(tmp.OS.VersionBuild));
+ WriteLog(' Версия NT: ' + IntToStr(tmp.OS.VersionMajor) + '.' + IntToStr(tmp.OS.VersionMinor));
+ WriteLog(' Ключ продукта: ' + tmp.OS.ProductID);
+ WriteLog('');
+ WriteLog('Экран:');
+ WriteLog(' Разрешение: ' + IntToStr(tmp.Screen.Width) + 'x' + IntToStr(tmp.Screen.Height));
+ WriteLog(' Частота обновления: ' + IntToStr(tmp.Screen.Hz) + ' Hz');
+ WriteLog(' Глубина цвета: ' + IntToStr(tmp.Screen.BitsPerPixel) + ' bits');
+end;
+
+procedure CmdToFileHandler(SubCommand:String);
+var
+ Cmd:String;
+ s:Boolean;
+begin
+ if SubCommandCount(SubCommand)>1 then
+  begin
+   ToFilePath:=ExtSubCommand(SubCommand,1);
+   Cmd:=Copy(SubCommand,GetSubCommandPos(SubCommand,2),Length(SubCommand)-Length(ToFilePath)-1);
+   ToFileFlag:=True;
+   ToFile.Clear;
+   Form12.ParseCommand(Cmd);
+   s:=True;
+   try
+    ToFile.SaveToFile(ToFilePath);
+   except
+    s:=False;
+   end;
+   ToFileFlag:=False;
+   if s then WriteLog('Результат выполнения команды ' + Cmd + ' сохранён в файл ' + ToFilePath)
+   else WriteLog('Невозможно сохранить файл по указанному пути.');
+  end
+ else
+  WriteLog('Недостаточно параметров');
+end;
+
+procedure CmdToFile2Handler(SubCommand:String);
+var
+ Cmd:String;
+ s:Boolean;
+begin
+ if SubCommandCount(SubCommand)>1 then
+  begin
+   ToFilePath:=ExtSubCommand(SubCommand,1);
+   Cmd:=Copy(SubCommand,GetSubCommandPos(SubCommand,2),Length(SubCommand)-Length(ToFilePath)-1);
+   ToFileFlag:=True;
+   ToFile.Clear;
+   if FileExists(ToFilePath) then
+    ToFile.LoadFromFile(ToFilePath);
+   Form12.ParseCommand(Cmd);
+   s:=True;
+   try
+    ToFile.SaveToFile(ToFilePath);
+   except
+    s:=False;
+   end;
+   ToFileFlag:=False;
+   if s then WriteLog('Результат выполнения команды ' + Cmd + ' добавлен в файл ' + ToFilePath)
+   else WriteLog('Невозможно сохранить файл по указанному пути.');
+  end
+ else
+  WriteLog('Недостаточно параметров');
+end;
+
+procedure TimerHandler(SubCommand:String);
+var
+ param,paramNext:String;
+ C,i:Integer;
+ tmpsec,tmpsecGlobal:Int64;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C=0 then
+  begin
+   if Form12.Timer1.Enabled then
+    begin
+     WriteLog('Таймер включён.');
+     WriteLog('Осталось: ' + MyTimeToStr(TimerSeconds/(24*60*60)));
+    end
+   else WriteLog('Таймер выключен.');
+  end
+ else if C=1 then
+  begin
+   param:=ExtSubCommand(SubCommand,1,True);
+   if param='stop' then
+    begin
+     Form12.Timer1.Enabled:=False;
+     WriteLog('Таймер остановлен.');
+    end
+   else if param='resume' then
+    begin
+     if TimerSeconds=0 then
+      begin
+       WriteLog('Таймер ещё не был установлен.');
+      end
+     else
+      begin
+       Form12.Timer1.Enabled:=True;
+       WriteLog('Таймер возобновлён.');
+       WriteLog('Осталось: ' + MyTimeToStr(TimerSeconds/(24*60*60)));
+      end;
+    end
+   else
+    begin
+     if StrToIntDef(param,0)=0 then
+      begin
+       WriteLog('Проверьте правильность ввода.');
+      end
+     else
+      begin
+       TimerSeconds:=StrToInt64Def(param,0);
+       Form12.Timer1.Enabled:=True;
+       WriteLog('Таймер запущен.');
+       WriteLog('Осталось: ' + MyTimeToStr(TimerSeconds/(24*60*60)));
+      end;
+    end;
+  end
+ else
+  begin
+   i:=0;
+   tmpsecGlobal:=0;
+   repeat
+    i:=i+1;
+    param:=ExtSubCommand(SubCommand,i);
+    tmpsec:=StrToInt64Def(param,0);
+    if C>i then
+     begin
+      paramNext:=ExtSubCommand(SubCommand,i+1,True);
+      if paramNext='s' then
+       i:=i+1
+      else if paramNext='m' then
+       begin
+        tmpsec:=tmpsec*60;
+        i:=i+1;
+       end
+      else if paramNext='h' then
+       begin
+        tmpsec:=tmpsec*60*60;
+        i:=i+1;
+       end
+      else if paramNext='d' then
+       begin
+        tmpsec:=tmpsec*60*60*24;
+        i:=i+1;
+       end;
+     end;
+    tmpsecGlobal:=tmpsecGlobal + Abs(tmpsec);
+   until i>=C;
+   if tmpsecGlobal=0 then
+    begin
+     WriteLog('Проверьте правильность ввода.');
+    end
+   else
+    begin
+     TimerSeconds:=tmpsecGlobal;
+     Form12.Timer1.Enabled:=True;
+     WriteLog('Таймер запущен.');
+     WriteLog('Осталось: ' + MyTimeToStr(TimerSeconds/(24*60*60)));
+    end;
+  end;
+end;
+
+procedure hscrlHandler(SubCommand:String);
+begin
+ if Form12.Memo1.ScrollBars=ssVertical then
+  begin
+   Form12.Memo1.ScrollBars:=ssBoth;
+   WriteLog('Горизонтальный скроллбар включён.');
+  end
+ else if Form12.Memo1.ScrollBars=ssBoth then
+  begin
+   Form12.Memo1.ScrollBars:=ssVertical;
+   WriteLog('Горизонтальный скроллбар отключён.');
+  end;
+end;
+
+procedure ClearHandler(SubCommand:String);
+begin
+ Form12.Memo1.Clear;
+end;
+
+procedure TitleHandler(SubCommand:String);
+begin
+ if Length(SubCommand)=0 then
+  WriteLog(Form12.Caption)
+ else
+  begin
+   Form12.Caption:=SubCommand;
+   WriteLog('Заголовок изменён.');
+  end;
+end;
+
+procedure AboutHandler(SubCommand:String);
+begin
+ WriteLog(APP_NAME + ' ' + APP_VERSION);
+ WriteLog('Автор: Somepony');
+ WriteLog('Написано на Delphi 7');
+ WriteLog('');
+ WriteLog('Данная программа бесплатна и распростроняется свободно.');
+ WriteLog('');
+ WriteLog('Используемые библиотеки:');
+ WriteLog(' Встроенные в EXE:');
+ WriteLog('  - DCPcrypt 2.0 (Хеширование и шифрование различными алгоритмами)');
+ WriteLog('  - Oscilloscope Visualyzation 0.8 от Alessandro Cappellozza (Немного модифицированная) (Рисование осциллоскопа на главной форме)');
+ WriteLog('  - uFMOD 1.25.2a (Проигрывание трекерной музыки в формате XM)');
+ WriteLog(' DLL (Обязательные, без них плаир не запустится):');
+ WriteLog('  - BASS 2.4.11 (Воспроизведение и запись звука)');
+ WriteLog('  - BASSWASAPI 2.4.1.2 (Дополнение BASS для работы с WASAPI (Windows Vista и выше))');
+ WriteLog('  - BASSmix 2.4.8 (Дополнение BASS для ресемплинга звука, записанного с WASAPI)');
+ WriteLog('  - Tags (Дополнение BASS для считывания тегов)');
+ WriteLog(' DLL (Необязательные, плаир запустится и без них, просто не будут работать некоторые функции):');
+ WriteLog('  - MediaInfoLib 0.7.7.6 (Подробная информация о медиафайле, пункт "MediaInfo" в меню (при условии наличия этой библиотеки))');
+ WriteLog('  - libeay32 и ssleay32 (Использование протокола SSL при работе с сетью. Без этих библиотек не будет работать импорт плейлистов из Вконтакте)');
+end;
+
+procedure RestoreWinVolHandler(SubCommand:String);
+var
+ tmp_val:Byte;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   if ExtSubCommand(SubCommand,1,True)='clear' then
+    begin
+     RestoreWinVolFlag:=False;
+     WriteLog('Общий уровень громкости не будет изменён.');
+     Exit;
+    end;
+   tmp_val:=StrToIntDef(ExtSubCommand(SubCommand,1),101);
+   if tmp_val<=100 then
+    begin
+     RestoreWinVolFlag:=True;
+     RestoreWinVolValue:=tmp_val;
+     WriteLog('Общий уровень громкости будет установлен на ' + IntToStr(tmp_val) + '.');
+    end
+   else WriteLog('Проверьте входные данные.');
+  end
+ else
+  HelpHandler('restorewinvol');
+end;
+
+procedure WebFaceHandler(SubCommand:String);
+var
+ tmpport:Integer;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   if ExtSubCommand(SubCommand,1,True)='stop' then
+    begin
+     Form12.HTTPSrv.Active:=False;
+     WriteLog(APP_NAME + ' Remote отключён');
+     Exit;
+    end;
+   tmpport:=StrToIntDef(ExtSubCommand(SubCommand,1),5000);
+   Form12.HTTPSrv.Active:=False;
+   Form12.HTTPSrv.DefaultPort:=tmpport;
+   Form12.HTTPSrv.Active:=True;
+   WriteLog(APP_NAME + ' Remote запущен на порту ' + IntToStr(tmpport));
+  end;
+end;
+
+procedure DInfoHandler(SubCommand:String);
+var
+ ID:Integer;
+ info:BASS_DEVICEINFO;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   ID:=StrToIntDef(ExtSubCommand(SubCommand,1),0);
+   if BASS_GetDeviceInfo(ID,info) then
+    begin
+     WriteLog('name: ' + info.name);
+     WriteLog('driver: ' + info.driver);
+    end
+   else
+    begin
+     WriteLog('device is invalid');
+    end;
+  end;
+end;
+
+procedure SetWinVolHandler(SubCommand:String);
+var
+ tmp_val:Byte;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   tmp_val:=StrToIntDef(ExtSubCommand(SubCommand,1),101);
+   if tmp_val<=100 then
+    begin
+     if IsVista then
+      Form1.SetVistaVolume(tmp_val)
+     else
+      Form1.SetWinXPVolume(tmp_val);
+     WriteLog('Общий уровень громкости установлен на ' + IntToStr(tmp_val) + '.');
+    end
+   else WriteLog('Проверьте входные данные.');
+  end
+ else
+  HelpHandler('setwinvol');
+end;
+
+procedure QEHandler(SubCommand:String);
+var
+ a,b,c:Extended;
+ function QEStr:String;
+  begin
+   Result:=FloatToStr(a)+'x^2';
+   if b<0 then
+    Result:=Result+FloatToStr(b)+'x'
+   else
+    Result:=Result+'+'+FloatToStr(b)+'x';
+   if c<0 then
+    Result:=Result+FloatToStr(c)+'=0'
+   else
+    Result:=Result+'+'+FloatToStr(c)+'=0';
+  end;
+ function LEStr:String;
+  begin
+   Result:=FloatToStr(b)+'x';
+   if c<0 then
+    Result:=Result+FloatToStr(c)+'=0'
+   else
+    Result:=Result+'+'+FloatToStr(c)+'=0';
+  end;
+ function D:Extended;
+  begin
+   Result:=b*b-4*a*c;
+  end;
+ function X(id:Byte):Extended;
+  begin
+   Result:=0;
+   case id of
+    1: Result:=((-b)+sqrt(D))/(2*a);
+    2: Result:=((-b)-sqrt(D))/(2*a);
+   end;
+  end;
+ function XC(id:Byte):String;
+  var
+   n1,n2,cC,bC:Extended;
+  begin
+   cC:=2*a;
+   bC:=sqrt(abs(D));
+   n1:=(-b)/cC;
+   n2:=bC/cC;
+   case id of
+    1: Result:=FloatToStr(n1)+'+'+FloatToStr(n2)+'i';
+    2: Result:=FloatToStr(n1)+'-'+FloatToStr(n2)+'i';
+   end;
+  end;
+begin
+ if SubCommandCount(SubCommand)>2 then
+  begin
+   a:=StrToFloatDef(ExtSubCommand(SubCommand,1),1);
+   b:=StrToFloatDef(ExtSubCommand(SubCommand,2),1);
+   c:=StrToFloatDef(ExtSubCommand(SubCommand,3),0);
+   WriteLog(QEStr);
+   WriteLog('');
+   if a=0 then
+    begin
+     WriteLog('a=0 - уравнение не является квадратным и будет решено как линейное.');
+     WriteLog('');
+     WriteLog(LEStr);
+     if b=0 then
+      if c=0 then
+       begin
+        WriteLog('');
+        WriteLog('a=b=0 - уравнение имеет бесконечное множество решений.');
+        WriteLog('XЄR : x*0=0');
+        Exit;
+       end
+      else
+       begin
+        WriteLog('');
+        WriteLog('a=0; b<>0 - уравнение не имеет решений.');
+        Exit;
+       end;
+     WriteLog(FloatToStr(b)+'x='+FloatToStr(0-c));
+     WriteLog('x='+FloatToStr((0-c)/b));
+     Exit;
+    end;
+   WriteLog('Найдём дискриминант');
+   WriteLog('D='+FloatToStr(D));
+   if D<0 then
+    begin
+     WriteLog('');
+     WriteLog('D<0 - уравнение не имеет корней на множестве действительных чисел.');
+     WriteLog('Будут вычислены корни на множестве комплексных чисел.');
+     WriteLog('');
+     WriteLog('X1='+XC(1));
+     WriteLog('X2='+XC(2));
+    end
+   else if D=0 then
+    begin
+     WriteLog('');
+     WriteLog('D=0 - уравнение имеет один корень (два совпадающих корня/корень кратности 2).');
+     WriteLog('');
+     WriteLog('X='+FloatToStr(X(1)));
+    end
+   else if D>0 then
+    begin
+     WriteLog('');
+     WriteLog('D>0 - уравнение имеет два корня.');
+     WriteLog('');
+     WriteLog('X1='+FloatToStr(X(1)));
+     WriteLog('X2='+FloatToStr(X(2)));
+    end;
+  end
+ else if SubCommandCount(SubCommand)>0 then
+  begin
+   WriteLog('Недостаточно параметров.');
+  end
+ else
+  HelpHandler('qe');
+end;
+
+procedure SetSpecModeHandler(SubCommand:String);
+var
+ ID:Byte;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   ID:=StrToIntDef(ExtSubCommand(SubCommand,1),255);
+   if Form1.SetSpecMode(ID) then
+    WriteLog('Режим визуализации изменён.')
+   else
+    WriteLog('Проверьте входные данные.');
+  end
+ else
+  HelpHandler('setspecmode');
+end;
+
+procedure WarmUpHandler(SubCommand:String);
+var
+ ID:Integer;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   if ExtSubCommand(SubCommand,1,True)='start' then
+    if not WarmingUp then
+     begin
+      for ID:= 0 To Cores-1 Do
+       WarmingThread[ID]:=TWarmingThread.Create(False);
+      WriteLog('Разогрев начат.');
+      WarmingUp:=True;
+     end
+    else WriteLog('Разогрев уже производится!');
+   if ExtSubCommand(SubCommand,1,True)='stop' then
+    if WarmingUp then
+     begin
+      for ID:= 0 To Cores-1 Do
+       begin
+        WarmingThread[ID].Terminate;
+        WarmingThread[ID].WaitFor;
+        FreeAndNil(WarmingThread[ID]);
+       end;
+      WriteLog('Разогрев окончен.');
+      WarmingUp:=False;
+     end
+    else WriteLog('Разогрев не производится.');
+  end
+ else
+  if WarmingUp then WriteLog('Разогрев производится.')
+  else WriteLog('Разогрев не производится.');
+end;
+
+procedure VarHandler(SubCommand:String);
+var
+ cmd,nname,tmp:String;
+ tmpnum,i,C:Integer;
+ tgl:Boolean;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   cmd:=ExtSubCommand(SubCommand,1,True);
+   if cmd='create' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       nname:=ExtSubCommand(SubCommand,2);
+       if AddNewVar(nname)=-1 then
+        WriteLog('Переменная с таким именем уже существует.')
+       else
+        WriteLog('Переменная "'+nname+'" создана.');
+      end
+     else WriteLog('Проверьте правильность ввода.');
+    end
+   else if cmd='delete' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       nname:=ExtSubCommand(SubCommand,2);
+       if DeleteVar(nname) then
+        WriteLog('Переменная "'+nname+'" удалена.')
+       else
+        WriteLog('Переменная "'+nname+'" не существует.');
+      end
+     else WriteLog('Проверьте правильность ввода.');
+    end
+   else if cmd='set' then
+    begin
+     if SubCommandCount(SubCommand)>2 then
+      begin
+       nname:=ExtSubCommand(SubCommand,2);
+       tmpnum:=GetVarNumByName(nname);
+       if tmpnum=-1 then
+        WriteLog('Переменная "'+nname+'" не существует.')
+       else
+        begin
+         tmp:=ExtSubCommand(SubCommand,3);
+         Vars[tmpnum].Value:=tmp;
+         WriteLog('Значение переменной "'+nname+'" обновлено.');
+        end;
+      end
+     else WriteLog('Проверьте правильность ввода.');
+    end
+   else if cmd='get' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       nname:=ExtSubCommand(SubCommand,2);
+       tmpnum:=GetVarNumByName(nname);
+       if tmpnum=-1 then
+        WriteLog('Переменная "'+nname+'" не существует.')
+       else
+        WriteLog('"'+nname+'" = "'+Vars[tmpnum].Value+'"');
+      end
+     else WriteLog('Проверьте правильность ввода.');
+    end
+   else if cmd='list' then
+    begin
+     C:=Length(Vars);
+     tgl:=False;
+     if C>0 then
+      begin
+       for i:= 0 to C-1 do
+        begin
+         if tgl then WriteLogStyle(IntToStr(i+1)+'. '+Vars[i].Name,[],clGray)
+         else WriteLog(IntToStr(i+1)+'. '+Vars[i].Name);
+         tgl:=not tgl;
+        end;
+      end
+     else WriteLog('Нет ни одной переменной.');
+    end
+   else HelpHandler('var');
+  end
+ else
+  HelpHandler('var');
+end;
+
+procedure BatteryInfoHandler(SubCommand:String);
+var
+ st:TSystemPowerStatus;
+ s:String;
+begin
+ GetSystemPowerStatus(st);
+ case st.ACLineStatus of
+  0: s := 'от батареи';
+  1: s := 'от сети';
+  else s := 'не известно';
+ end;
+ WriteLog('Питание: ' + s);
+ case st.BatteryFlag of
+  0: s := 'нормальный';
+  1: s := 'высокий';
+  2: s := 'низкий';
+  4: s := 'критический';
+  8: s := 'заряжается';
+  128: s := 'батарея отсутствует';
+  else s := 'нет информации';
+ end;
+ WriteLog('Заряд батарей: ' + s);
+ WriteLog('Уровень заряда: ' + IntToStr(st.BatteryLifePercent) + '%');
+ if Integer(st.BatteryLifeTime) < 0 then s := 'неизвестно'
+ else s := TimeToStr(st.BatteryLifeTime / SecsPerDay);
+ WriteLog('Время работы от батерей: ' + s);
+ if Integer(st.BatteryFullLifeTime) = -1 then s := 'неизвестно'
+ else s := TimeToStr(st.BatteryFullLifeTime / SecsPerDay);
+ WriteLog('Максимальное время работы: ' + s);
+end;
+
+procedure RollHandler(SubCommand:String);
+var
+ Res,X,Y:Int64;
+ C:Integer;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=2 then
+  begin
+   X:=StrToInt64Def(ExtSubCommand(SubCommand,1),1);
+   Y:=StrToInt64Def(ExtSubCommand(SubCommand,2),100);
+  end
+ else if C=1 then
+  begin
+   X:=1;
+   Y:=StrToInt64Def(ExtSubCommand(SubCommand,1),100);
+  end
+ else
+  begin
+   X:=1;
+   Y:=100;
+  end;
+ Res:=Round(Random*(Y-X)+X);
+ WriteLog('Число: ' + IntToStr(Res) + '. (' + IntToStr(X) + '..' + IntToStr(Y) + ')');
+end;
+
+procedure StartInHandler(SubCommand:String);
+var
+ param,paramNext:String;
+ C,i:Integer;
+ tmpsec,tmpsecGlobal:Int64;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=1 then
+  begin
+   i:=0;
+   tmpsecGlobal:=0;
+   repeat
+    i:=i+1;
+    param:=ExtSubCommand(SubCommand,i);
+    tmpsec:=StrToInt64Def(param,0);
+    if C>i then
+     begin
+      paramNext:=ExtSubCommand(SubCommand,i+1,True);
+      if paramNext='s' then
+       i:=i+1
+      else if paramNext='m' then
+       begin
+        tmpsec:=tmpsec*60;
+        i:=i+1;
+       end
+      else if paramNext='h' then
+       begin
+        tmpsec:=tmpsec*60*60;
+        i:=i+1;
+       end
+      else if paramNext='d' then
+       begin
+        tmpsec:=tmpsec*60*60*24;
+        i:=i+1;
+       end;
+     end;
+    tmpsecGlobal:=tmpsecGlobal + Abs(tmpsec);
+   until i>=C;
+   if tmpsecGlobal=0 then
+    begin
+     WriteLog('Проверьте правильность ввода.');
+    end
+   else
+    begin
+     TimerSeconds2:=tmpsecGlobal;
+     Form12.Timer2.Enabled:=True;
+     WriteLog('Таймер запущен.');
+     WriteLog('Осталось: ' + MyTimeToStr(TimerSeconds2/(24*60*60)));
+    end;
+  end;
+end;
+
+procedure GetCmdAddrHandler(SubCommand:String);
+var
+ C,tid:Integer;
+ tmp:String;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=1 then
+  begin
+   tmp:=ExtSubCommand(SubCommand,1,True);
+   tid:=Form12.GetCommandID(tmp);
+   if tid=-1 then
+    WriteLog('Команда "' + tmp + '" не существует.')
+   else
+    begin
+     WriteLog('hex: ' + IntToHex(Integer(@Commands[tid].Handler),1));
+     WriteLog('dec: ' + IntToStr(Integer(@Commands[tid].Handler)));
+    end;
+  end;
+end;
+
+procedure SetCmdAddrHandler(SubCommand:String);
+var
+ C,tid:Integer;
+ tmp:String;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=2 then
+  begin
+   tmp:=ExtSubCommand(SubCommand,1,True);
+   tid:=Form12.GetCommandID(tmp);
+   if tid=-1 then
+    WriteLog('Команда "' + tmp + '" не существует.')
+   else
+    begin
+     Integer(@Commands[tid].Handler):=StrToIntDef(ExtSubCommand(SubCommand,2),Integer(@Commands[tid].Handler));
+     WriteLog('Адрес вызова изменён.');
+     WriteLog('hex: ' + IntToHex(Integer(@Commands[tid].Handler),1));
+     WriteLog('dec: ' + IntToStr(Integer(@Commands[tid].Handler)));
+    end;
+  end;
+end;
+
+procedure SetVolumeHandler(SubCommand:String);
+var
+ C,tmp:Integer;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=1 then
+  begin
+   tmp:=StrToIntDef(ExtSubCommand(SubCommand,1),-1);
+   if (tmp>=0) and (tmp<=1000) then
+    begin
+     Form3.SetVolume(tmp);
+     WriteLog('Громкость изменена.');
+    end
+   else WriteLog('Проверьте входные параметры.');
+  end
+ else HelpHandler('setvolume');
+end;
+
+procedure SetPlaySpeedHandler(SubCommand:String);
+var
+ C,tmp:Integer;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=1 then
+  begin
+   tmp:=StrToIntDef(ExtSubCommand(SubCommand,1),-1);
+   if (tmp>=0) and (tmp<=100000) then
+    begin
+     Form3.SetSpeed(tmp);
+     if tmp=0 then
+      WriteLog('Скорость вернулась в норму.')
+     else if tmp<100 then
+      WriteLog('Скорость не изменилась. Введите значение больше 100.')
+     else
+      WriteLog('Скорость изменена и составила ' + FormatFloat('0.####',speedprc) + '% от нормальной (' + IntToStr(cfrc) + ').');
+    end
+   else WriteLog('Проверьте входные параметры.');
+  end
+ else HelpHandler('setplayspeed');
+end;
+
+procedure SetBalanceHandler(SubCommand:String);
+var
+ C,tmp:Integer;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=1 then
+  begin
+   tmp:=StrToIntDef(ExtSubCommand(SubCommand,1),9001);
+   if (tmp>=-1000) and (tmp<=1000) then
+    begin
+     Form3.SetBalance(tmp);
+     WriteLog('Баланс левого и правого каналов изменён.');
+    end
+   else WriteLog('Проверьте входные параметры.');
+  end
+ else HelpHandler('setbalance');
+end;
+
+procedure SetPlayDeviceHandler(SubCommand:String);
+var
+ C,tmp,dc:Integer;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=1 then
+  begin
+   tmp:=StrToIntDef(ExtSubCommand(SubCommand,1),-1);
+   dc:=Form3.ComboBox1.Items.Count;
+   if (tmp>=0) and (tmp<=(dc-1)) then
+    begin
+     Form3.ChangeDevice(tmp+1);
+     WriteLog('Используемое устройство воспроизведение именено на ' + Form3.ComboBox1.Items.Strings[tmp] + '.');
+    end
+   else WriteLog('Проверьте входные параметры.');
+  end
+ else HelpHandler('setplaydevice');
+end;
+
+procedure ToggleReverbHandler(SubCommand:String);
+var
+ tmp:Boolean;
+begin
+ tmp:=not Form3.CheckBox1.Checked;
+ Form3.CheckBox1.Checked:=tmp;
+ if tmp then
+  WriteLog('Эффект реверберации включён.')
+ else
+  WriteLog('Эффект реверберации выключен.');
+end;
+
+procedure RewindHandler(SubCommand:String);
+var
+ tmp:String;
+ tmpval,C:Integer;
+ totalsongsec,cursongsec:Integer;
+ cursongprc:Extended;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=1 then
+  begin
+   tmp:=ExtSubCommand(SubCommand,1);
+   totalsongsec:=Form1.PosBar1.Max;
+   cursongsec:=Form1.PosBar1.Position;
+   cursongprc:=cursongsec*100/totalsongsec;
+   if Length(tmp)>0 then
+    begin
+     if tmp[Length(tmp)]='%' then
+      begin
+       Delete(tmp,Length(tmp),1);
+       if tmp[1]='+' then
+        begin
+         Delete(tmp,1,1);
+         tmpval:=StrToIntDef(tmp,-1);
+         if tmpval=-1 then
+          WriteLog('Проверьте входные параметры.')
+         else
+          begin
+           if (tmpval+cursongprc)>100 then
+            WriteLog('Проверьте входные параметры. Вы пытаетесь перемотать дальше конца.')
+           else
+            begin
+             Form1.RewForwardPrc(tmpval);
+             WriteLog('Успешная перемотка вперёд на ' + tmp + ' процентов.');
+            end;
+          end;
+        end
+       else if tmp[1]='-' then
+        begin
+         Delete(tmp,1,1);
+         tmpval:=StrToIntDef(tmp,-1);
+         if tmpval=-1 then
+          WriteLog('Проверьте входные параметры.')
+         else
+          begin
+           Form1.RewBackwardPrc(tmpval);
+           if tmpval>cursongprc then
+            tmp:=IntToStr(Round(cursongprc));
+           WriteLog('Успешная перемотка назад на ' + tmp + ' процентов.');
+          end;
+        end
+       else
+        begin
+         tmpval:=StrToIntDef(tmp,-1);
+         if tmpval=-1 then
+          WriteLog('Проверьте входные параметры.')
+         else
+          begin
+           if tmpval>100 then
+            WriteLog('Проверьте входные параметры. Вы пытаетесь перемотать дальше конца.')
+           else
+            begin
+             Form1.RewExactPrc(tmpval);
+             WriteLog('Успешная перемотка на ' + tmp + '-й процент.');
+            end;
+          end;
+        end;
+      end
+     else
+      begin
+       if tmp[1]='+' then
+        begin
+         Delete(tmp,1,1);
+         tmpval:=StrToIntDef(tmp,-1);
+         if tmpval=-1 then
+          WriteLog('Проверьте входные параметры.')
+         else
+          begin
+           if ((tmpval*1000)+cursongsec)>totalsongsec then
+            WriteLog('Проверьте входные параметры. Вы пытаетесь перемотать дальше конца.')
+           else
+            begin
+             Form1.RewForward(tmpval);
+             WriteLog('Успешная перемотка вперёд на ' + tmp + ' секунд.');
+            end;
+          end;
+        end
+       else if tmp[1]='-' then
+        begin
+         Delete(tmp,1,1);
+         tmpval:=StrToIntDef(tmp,-1);
+         if tmpval=-1 then
+          WriteLog('Проверьте входные параметры.')
+         else
+          begin
+           Form1.RewBackward(tmpval);
+           if (tmpval*1000)>cursongsec then
+            tmp:=IntToStr(Round(cursongsec/1000));
+           WriteLog('Успешная перемотка назад на ' + tmp + ' секунд.');
+          end;
+        end
+       else
+        begin
+         tmpval:=StrToIntDef(tmp,-1);
+         if tmpval=-1 then
+          WriteLog('Проверьте входные параметры.')
+         else
+          begin
+           if (tmpval*1000)>totalsongsec then
+            WriteLog('Проверьте входные параметры. Вы пытаетесь перемотать дальше конца.')
+           else
+            begin
+             Form1.RewExact(tmpval);
+             WriteLog('Успешная перемотка на ' + tmp + '-ю секунду.');
+            end;
+          end;
+        end;
+      end;
+    end;
+  end
+ else HelpHandler('rewind');
+end;
+
+procedure AddCmdHandler(SubCommand:String);
+var
+ C:Integer;
+ tmpcmd:TCommand;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=4 then
+  begin
+   tmpcmd.Name:=ExtSubCommand(SubCommand,1,True);
+   Integer(@tmpcmd.Handler):=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+   tmpcmd.ShortDesc:=ExtSubCommand(SubCommand,3);
+   tmpcmd.LongDesc:=ExtSubCommand(SubCommand,4);
+   if Form12.AddCommand(tmpcmd) then
+    WriteLog('Команда добавлена.')
+   else
+    WriteLog('Команда не добавлена. Проверьте название команды, оно не должно совпадать с уже существующими.');
+  end
+ else
+  HelpHandler('addcmd');
+end;
+
+procedure StatsHandler(SubCommand:String);
+var
+ C:Integer;
+ tmp:String;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>0 then
+  tmp:=ExtSubCommand(SubCommand,1,True)
+ else tmp:='';
+ if tmp='clear' then
+  begin
+   Form1.ClearStats;
+   Form1.SaveStats;
+   WriteLog('Статистика обнулена.');
+   Exit;
+  end
+ else
+  begin
+   if Playing then
+    Form1.UpdateStatsPlayedTime;
+   Form1.UpdateStatsUptime;
+   WriteLog('Общее время воспроизведения (за эту сессию): ' + MyTimeToStr(Stats.PlayedTimeMSECThisRun/(1000 * 60 * 60 * 24),True));
+   WriteLog('Общее время воспроизведения (всего): ' + MyTimeToStr((Stats.PlayedTimeMSECTotal+Stats.PlayedTimeMSECThisRun)/(1000 * 60 * 60 * 24),True));
+   WriteLog('Воспроизведено треков (за эту сессию): ' + IntToStr(Stats.PlayedTraxThisRun));
+   WriteLog('Воспроизведено треков (всего): ' + IntToStr(Stats.PlayedTraxTotal));
+   WriteLog('Общее время работы программы: ' + MyTimeToStr(Stats.UptimeMSECTotal/(1000 * 60 * 60 * 24),True));
+   WriteLog('Количество запусков программы: ' + IntToStr(Stats.LaunchedTimesTotal));
+   WriteLog('Использовано команд в консоли: ' + IntToStr(Stats.ConsoleCmdsUsedTimesTotal));
+  end;
+end;
+
+procedure DropChanHandler(SubCommand:String);
+begin
+ Form1.DropChannel;
+ WriteLog('Готово.');
+end;
+
+procedure RDInfoHandler(SubCommand:String);
+var
+ ID:Integer;
+ info:BASS_DEVICEINFO;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   ID:=StrToIntDef(ExtSubCommand(SubCommand,1),0);
+   if BASS_RecordGetDeviceInfo(ID,info) then
+    begin
+     WriteLog('name: ' + info.name);
+     WriteLog('driver: ' + info.driver);
+    end
+   else
+    begin
+     WriteLog('device is invalid');
+    end;
+  end;
+end;
+
+procedure RIInfoHandler(SubCommand:String);
+var
+ ID,errcode:Integer;
+ info:PAnsiChar;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   ID:=StrToIntDef(ExtSubCommand(SubCommand,1),0);
+   info:=BASS_RecordGetInputName(ID);
+   if info=nil then
+    begin
+     errcode:=BASS_ErrorGetCode;
+     case errcode of
+      BASS_ERROR_INIT: WriteLog('BASS_RecordInit has not been successfully called');
+      BASS_ERROR_ILLPARAM: WriteLog('input is invalid');
+      else WriteLog('unknown problem');
+     end;
+    end
+   else
+    begin
+     WriteLog(info);
+    end;
+  end;
+end;
+
+procedure WADInfoHandler(SubCommand:String);
+var
+ ID:Integer;
+ info:BASS_WASAPI_DEVICEINFO;
+ function BuildTypeString(tType:Integer):String;
+ begin
+  Result:='';
+  case tType of
+   BASS_WASAPI_TYPE_NETWORKDEVICE:
+    Result:='Network Device';
+   BASS_WASAPI_TYPE_SPEAKERS:
+    Result:='Speakers';
+   BASS_WASAPI_TYPE_LINELEVEL:
+    Result:='Line-Level';
+   BASS_WASAPI_TYPE_HEADPHONES:
+    Result:='Headphones';
+   BASS_WASAPI_TYPE_MICROPHONE:
+    Result:='Microphone';
+   BASS_WASAPI_TYPE_HEADSET:
+    Result:='Headset';
+   BASS_WASAPI_TYPE_HANDSET:
+    Result:='Handset';
+   BASS_WASAPI_TYPE_DIGITAL:
+    Result:='Digital';
+   BASS_WASAPI_TYPE_SPDIF:
+    Result:='S/PDIF';
+   BASS_WASAPI_TYPE_HDMI:
+    Result:='HDMI';
+   BASS_WASAPI_TYPE_UNKNOWN:
+    Result:='Unknown';
+   else
+    Result:='Unknown';
+  end;
+ end;
+ function BuildFlagsString(Flags:Integer):String;
+ begin
+  Result:='';
+  if Flags=0 then
+   begin
+    Result:='Flags are not set.';
+    Exit;
+   end;
+  if BASS_DEVICE_ENABLED = (Flags and BASS_DEVICE_ENABLED) then
+   Result:=Result + 'ENABLED';
+  if BASS_DEVICE_DEFAULT = (Flags and BASS_DEVICE_DEFAULT) then
+   begin
+    if Result<>'' then Result:=Result + ', ';
+   Result:=Result+'DEFAULT';
+   end;
+  if BASS_DEVICE_INIT = (Flags and BASS_DEVICE_INIT) then
+   begin
+    if Result<>'' then Result:=Result + ', ';
+   Result:=Result+'INIT';
+   end;
+  if BASS_DEVICE_INPUT = (Flags and BASS_DEVICE_INPUT) then
+   begin
+    if Result<>'' then Result:=Result + ', ';
+   Result:=Result+'INPUT';
+   end;
+  if BASS_DEVICE_LOOPBACK = (Flags and BASS_DEVICE_LOOPBACK) then
+   begin
+    if Result<>'' then Result:=Result + ', ';
+   Result:=Result+'LOOPBACK';
+   end;
+  if BASS_DEVICE_UNPLUGGED = (Flags and BASS_DEVICE_UNPLUGGED) then
+   begin
+    if Result<>'' then Result:=Result + ', ';
+   Result:=Result+'UNPLUGGED';
+   end;
+  if BASS_DEVICE_DISABLED = (Flags and BASS_DEVICE_DISABLED) then
+   begin
+    if Result<>'' then Result:=Result + ', ';
+   Result:=Result+'DISABLED';
+   end;
+ end;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   ID:=StrToIntDef(ExtSubCommand(SubCommand,1),0);
+   if BASS_WASAPI_GetDeviceInfo(ID,info) then
+    begin
+     WriteLog('name: ' + info.name);
+     WriteLog('id: ' + info.id);
+     WriteLog('type: ' + BuildTypeString(info.ttype));
+     WriteLog('flags: ' + BuildFlagsString(info.flags));
+     WriteLog('minperiod: ' + FloatToStr(info.minperiod));
+     WriteLog('defperiod: ' + FloatToStr(info.defperiod));
+     WriteLog('mixfreq: ' + IntToStr(info.mixfreq));
+     WriteLog('mixchans: ' + IntToStr(info.mixchans));
+    end
+   else
+    begin
+     WriteLog('device is invalid');
+    end;
+  end;
+end;
+
+procedure WASInfoHandler(SubCommand:String);
+var
+ info:BASS_WASAPI_INFO;
+ ErrCode:Integer;
+ function BuildFlagsString(Flags:Integer):String;
+ begin
+  Result:='';
+  if Flags=0 then
+   begin
+    Result:='Flags are not set.';
+    Exit;
+   end;
+  if BASS_WASAPI_AUTOFORMAT = (Flags and BASS_WASAPI_AUTOFORMAT) then
+   Result:=Result + 'AUTOFORMAT';
+  if BASS_WASAPI_BUFFER = (Flags and BASS_WASAPI_BUFFER) then
+   begin
+    if Result<>'' then Result:=Result + ', ';
+   Result:=Result+'BUFFER';
+   end;
+  if BASS_WASAPI_EVENT = (Flags and BASS_WASAPI_EVENT) then
+   begin
+    if Result<>'' then Result:=Result + ', ';
+   Result:=Result+'EVENT';
+   end;
+  if BASS_WASAPI_EXCLUSIVE = (Flags and BASS_WASAPI_EXCLUSIVE) then
+   begin
+    if Result<>'' then Result:=Result + ', ';
+   Result:=Result+'EXCLUSIVE';
+   end;
+ end;
+ function BuildFormatString(Format:Integer):String;
+ begin
+  Result:='';
+  case Format of
+   BASS_WASAPI_FORMAT_8BIT:
+    Result:='8-bit integer';
+   BASS_WASAPI_FORMAT_16BIT:
+    Result:='16-bit integer';
+   BASS_WASAPI_FORMAT_24BIT:
+    Result:='24-bit integer';
+   BASS_WASAPI_FORMAT_32BIT:
+    Result:='32-bit integer';
+   BASS_WASAPI_FORMAT_FLOAT:
+    Result:='32-bit floating-point';
+   else
+    Result:='Unknown';
+  end;
+ end;
+begin
+ if BASS_WASAPI_GetInfo(info) then
+  begin
+   WriteLog('initflags: ' + BuildFlagsString(info.initflags));
+   WriteLog('freq: ' + IntToStr(info.freq));
+   WriteLog('chans: ' + IntToStr(info.chans));
+   WriteLog('format: ' + BuildFormatString(info.format));
+   WriteLog('buflen: ' + IntToStr(info.buflen));
+   WriteLog('volmax: ' + FloatToStr(info.volmax));
+   WriteLog('volmin: ' + FloatToStr(info.volmin));
+   WriteLog('volstep: ' + FloatToStr(info.volstep));
+  end
+ else
+  begin
+   ErrCode:=BASS_ErrorGetCode;
+   case ErrCode of
+    BASS_ERROR_INIT:
+     WriteLog('BASS_WASAPI_Init has not been successfully called.');
+    else
+     WriteLog('Unknown problem.');
+   end;
+  end;
+end;
+
+procedure WindowHandler(SubCommand:String);
+var
+ prm,newname,sstr:String;
+ i,wid,alvl,old,nx,ny:Integer;
+ found:Boolean;
+ winrect:TRect;
+ procedure UpdateWindowList;
+ var
+  wnd:hwnd;
+  buff:array[0..127] of Char;
+ begin
+  SetLength(WindowList,0);
+  wnd:=GetWindow(Form1.Handle,gw_hwndfirst);
+  while wnd <> 0 do
+   begin
+    if (GetWindowText(wnd,buff,SizeOf(buff))<>0) then
+     begin
+      GetWindowText(wnd,buff,SizeOf(buff));
+      if StrPas(buff)<>'Program Manager' then
+       begin
+        SetLength(WindowList,Length(WindowList)+1);
+        WindowList[Length(WindowList)-1].Name:=StrPas(buff);
+        WindowList[Length(WindowList)-1].Handle:=wnd;
+       end;
+     end;
+    wnd:=GetWindow(wnd,gw_hwndnext);
+   end;
+ end;
+begin
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   prm:=ExtSubCommand(SubCommand,1,True);
+   if prm='update' then
+    begin
+     UpdateWindowList;
+     WriteLog('Список окон обновлён.');
+    end
+   else if prm='list' then
+    begin
+     if Length(WindowList)>0 then
+      for i:= 0 to Length(WindowList)-1 do
+       WriteLog(IntToStr(i+1) + ' - ' + WindowList[i].Name)
+     else WriteLog('В списке нет ни одного окна. Возможно команда "window update" не была использована.');
+    end
+   else if prm='hide' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       wid:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+       if (wid<1) or (wid>Length(WindowList)) then
+        WriteLog('Введён неверный номер окна.')
+       else
+        begin
+         if Length(WindowList)=0 then
+          WriteLog('В списке нет ни одного окна. Возможно команда "window update" не была использована.')
+         else
+          begin
+           if ShowWindow(WindowList[wid-1].Handle,SW_HIDE) then
+            WriteLog('Окно "' + WindowList[wid-1].Name + '" скрыто.')
+           else
+            if GetLastError=ERROR_INVALID_WINDOW_HANDLE then
+             WriteLog('Ошибка: окно "' + WindowList[wid-1].Name + '" не существует. Попробуйте выполнить команду "window update"')
+            else
+             WriteLog('Не удалось скрыть окно "' + WindowList[wid-1].Name + '". Возможно оно уже скрыто.');
+          end;
+        end;
+      end
+     else WriteLog('Номер окна не введён.');
+    end
+   else if prm='show' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       wid:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+       if (wid<1) or (wid>Length(WindowList)) then
+        WriteLog('Введён неверный номер окна.')
+       else
+        begin
+         if Length(WindowList)=0 then
+          WriteLog('В списке нет ни одного окна. Возможно команда "window update" не была использована.')
+         else
+          begin
+           SetLastError(0);
+           if not ShowWindow(WindowList[wid-1].Handle,SW_SHOW) then
+            begin
+             if GetLastError=ERROR_INVALID_WINDOW_HANDLE then
+              WriteLog('Ошибка: окно "' + WindowList[wid-1].Name + '" не существует. Попробуйте выполнить команду "window update"')
+             else
+              WriteLog('Окно "' + WindowList[wid-1].Name + '" показано.');
+            end
+           else
+            WriteLog('Не удалось показать окно "' + WindowList[wid-1].Name + '". Возможно оно не скрыто.');
+          end;
+        end;
+      end
+     else WriteLog('Номер окна не введён.');
+    end
+   else if prm='rename' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       wid:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+       if (wid<1) or (wid>Length(WindowList)) then
+        WriteLog('Введён неверный номер окна.')
+       else
+        begin
+         if Length(WindowList)=0 then
+          WriteLog('В списке нет ни одного окна. Возможно команда "window update" не была использована.')
+         else
+          begin
+           if SubCommandCount(SubCommand)>2 then
+            begin
+             newname:=ExtSubCommand(SubCommand,3);
+             if SetWindowText(WindowList[wid-1].Handle,PChar(newname)) then
+              WriteLog('Имя окна "' + WindowList[wid-1].Name + '" изменено.')
+             else
+              if GetLastError=ERROR_INVALID_WINDOW_HANDLE then
+               WriteLog('Ошибка: окно "' + WindowList[wid-1].Name + '" не существует. Попробуйте выполнить команду "window update"')
+              else
+               WriteLog('Не удалось изменить имя окна "' + WindowList[wid-1].Name + '".');
+            end
+           else WriteLog('Новое имя не введено.');
+          end;
+        end;
+      end
+     else WriteLog('Номер окна не введён.');
+    end
+   else if prm='alpha' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       wid:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+       if (wid<1) or (wid>Length(WindowList)) then
+        WriteLog('Введён неверный номер окна.')
+       else
+        begin
+         if Length(WindowList)=0 then
+          WriteLog('В списке нет ни одного окна. Возможно команда "window update" не была использована.')
+         else
+          begin
+           if SubCommandCount(SubCommand)>2 then
+            begin
+             old:=GetWindowLongA(WindowList[wid-1].Handle,GWL_EXSTYLE);
+             alvl:=StrToIntDef(ExtSubCommand(SubCommand,3),255);
+             if alvl<0 then alvl:=0;
+             if alvl>255 then alvl:=255;
+             SetWindowLong(WindowList[wid-1].Handle,GWL_EXSTYLE,old or $80000);
+             SetLayeredWindowAttributes(WindowList[wid-1].Handle,0,alvl,$2);
+             WriteLog('Уровень непрозрачности окна "' + WindowList[wid-1].Name + '" изменён.');
+            end
+           else WriteLog('Новый уровень непрозрачности не введён.');
+          end;
+        end;
+      end
+     else WriteLog('Номер окна не введён.');
+    end
+   else if prm='ghost' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       wid:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+       if (wid<1) or (wid>Length(WindowList)) then
+        WriteLog('Введён неверный номер окна.')
+       else
+        begin
+         if Length(WindowList)=0 then
+          WriteLog('В списке нет ни одного окна. Возможно команда "window update" не была использована.')
+         else
+          begin
+           old:=GetWindowLongA(WindowList[wid-1].Handle,GWL_EXSTYLE);
+           SetWindowLong(WindowList[wid-1].Handle,GWL_EXSTYLE,old or WS_EX_TRANSPARENT);
+           SetWindowPos(WindowList[wid-1].Handle,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE or SWP_NOSIZE or SWP_NOACTIVATE);
+           WriteLog('Окно "' + WindowList[wid-1].Name + '" теперь призрак.');
+          end;
+        end;
+      end
+     else WriteLog('Номер окна не введён.');
+    end
+   else if prm='search' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       sstr:=ExtSubCommand(SubCommand,2);
+       if Length(WindowList)=0 then
+        WriteLog('В списке нет ни одного окна. Возможно команда "window update" не была использована.')
+       else
+        begin
+         found:=False;
+         for i:= 0 to Length(WindowList)-1 do
+          if Form2.FindANeedleInAHaystack(sstr,WindowList[i].Name)<>0 then
+           begin
+            WriteLog(IntToStr(i+1) + ' - ' + WindowList[i].Name);
+            found:=True;
+           end;
+         if not found then
+          WriteLog('Ни одного окна не было найдено.');
+        end;
+      end
+     else WriteLog('Строка для поиска не введена.');
+    end
+   else if prm='move' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       wid:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+       if (wid<1) or (wid>Length(WindowList)) then
+        WriteLog('Введён неверный номер окна.')
+       else
+        begin
+         if Length(WindowList)=0 then
+          WriteLog('В списке нет ни одного окна. Возможно команда "window update" не была использована.')
+         else
+          begin
+           if SubCommandCount(SubCommand)>3 then
+            begin
+             nx:=StrToIntDef(ExtSubCommand(SubCommand,3),0);
+             ny:=StrToIntDef(ExtSubCommand(SubCommand,4),0);
+             GetWindowRect(WindowList[wid-1].Handle,winrect);
+             SetWindowPos(WindowList[wid-1].Handle,HWND_TOP,nx,ny,winrect.Right-winrect.Left,winrect.Bottom-winrect.Top,0);
+             WriteLog('Окно "' + WindowList[wid-1].Name + '" сдвинуто.');
+            end
+           else WriteLog('Новые координаты окна не введены.');
+          end;
+        end;
+      end
+     else WriteLog('Номер окна не введён.');
+    end
+   else if prm='resize' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       wid:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+       if (wid<1) or (wid>Length(WindowList)) then
+        WriteLog('Введён неверный номер окна.')
+       else
+        begin
+         if Length(WindowList)=0 then
+          WriteLog('В списке нет ни одного окна. Возможно команда "window update" не была использована.')
+         else
+          begin
+           if SubCommandCount(SubCommand)>3 then
+            begin
+             nx:=StrToIntDef(ExtSubCommand(SubCommand,3),0);
+             ny:=StrToIntDef(ExtSubCommand(SubCommand,4),0);
+             GetWindowRect(WindowList[wid-1].Handle,winrect);
+             SetWindowPos(WindowList[wid-1].Handle,HWND_TOP,winrect.Left,winrect.Top,nx,ny,0);
+             WriteLog('Размер окна "' + WindowList[wid-1].Name + '" изменён.');
+            end
+           else WriteLog('Новые размеры окна не введены.');
+          end;
+        end;
+      end
+     else WriteLog('Номер окна не введён.');
+    end
+   else WriteLog('Неизвестная команда. Проверьте правильность ввода или воспользуйтесь командой "help window".');
+  end
+ else
+  HelpHandler('window');
+end;
+
+procedure FloodHandler(SubCommand:String);
+const
+ kbytes=1024;
+ mbytes=1048576;
+ gbytes=1073741824;
+var
+ fpath,metr:String;
+ FLOOD:TFileStream;
+ C:Integer;
+ fsize:Int64;
+ b:Byte;
+begin
+ C:=SubCommandCount(SubCommand);
+ if C>=2 then
+  begin
+   b:=0;
+   fpath:=ExtSubCommand(SubCommand,1);
+   fsize:=StrToIntDef(ExtSubCommand(SubCommand,2),0);
+   if C>=3 then
+    metr:=ExtSubCommand(SubCommand,3)
+   else
+    metr:='b';
+   case metr[1] of
+    'k': fsize:=fsize*kbytes;
+    'm': fsize:=fsize*mbytes;
+    'g': fsize:=fsize*gbytes;
+   end;
+   try
+    FLOOD:=TFileStream.Create(fpath,fmOpenWrite or fmCreate);
+    FLOOD.Seek(fsize-1,soEnd);
+    FLOOD.Write(b,1);
+    FreeAndNil(FLOOD);
+    WriteLog('Файл создан.');
+   except
+    WriteLog('Не удалось создать файл.');
+   end;
+  end
+ else
+  HelpHandler('flood');
+end;
+
+procedure GetErrorLogHandler(SubCommand:String);
+begin
+ RawWriteLog(ErrorLog.Text);
+end;
+
+procedure WriteErrorLogHandler(SubCommand:String);
+begin
+ Form1.AddErrorLog('[Консоль] ' + Trim(SubCommand));
+ WriteLog('Запись добавлена в лог ошибок.');
+end;
+
+procedure OSDHandler(SubCommand:String);
+var
+ cmd:String;
+begin
+ if not AppLoaded then WriteLog('Команда "osd" недоступна из autorun.txt')
+ else
+ if SubCommandCount(SubCommand)>0 then
+  begin
+   cmd:=ExtSubCommand(SubCommand,1,True);
+   if cmd='settext' then
+    begin
+     if SubCommandCount(SubCommand)>1 then
+      begin
+       FormOSD.SetOSDText(ExtSubCommand(SubCommand,2));
+       WriteLog('Текст OSD установлен.');
+      end
+     else
+      WriteLog('Текст не введён.');
+    end
+   else if cmd='gettext' then
+    begin
+     WriteLog('Текст OSD: ' + FormOSD.Label1.Caption);
+    end
+   else if cmd='show' then
+    begin
+     FormOSD.ShowOSD(True);
+     WriteLog('OSD показан.');
+    end
+   else HelpHandler('osd');
+  end
+ else
+  HelpHandler('osd');
+end;
+
+procedure LogVKAPIHandler(SubCommand:String);
+begin
+ LogVKAPIToConsole:=not LogVKAPIToConsole;
+ if LogVKAPIToConsole then
+  WriteLog('Вывод ответов VKAPI в консоль включён.')
+ else
+  WriteLog('Вывод ответов VKAPI в консоль отключён.');
+end;
+
+procedure DetHandler(SubCommand:String);
+var
+ size:Extended;
+ scc,sizeT:Integer;
+ M:TExtArr;
+ procedure FillMatrix;
+ var
+  i,j,x:Integer;
+ begin
+  SetLength(M,sizeT,sizeT);
+  x:=0;
+  for i:= 0 to sizeT-1 do
+  for j:= 0 to sizeT-1 do
+   begin
+    x:=x+1;
+    M[i,j]:=StrToFloatDef(ExtSubCommand(SubCommand,x),0);
+   end;
+ end;
+ procedure PrintMatrix;
+ var
+  i,j,cw:Integer;
+  tmp:String;
+  function GetColWidth(cid:Integer):Integer;
+  var
+   i,L:Integer;
+  begin
+   Result:=0;
+   for i:= 0 to sizeT-1 do
+    begin
+     L:=Length(FloatToStr(M[i,cid]));
+     if L>Result then Result:=L;
+    end;
+  end;
+  function FloatToStrFW(Value:Extended;Width:Integer):String;
+  var
+   i:Integer;
+  begin
+   Result:=FloatToStr(Value);
+   if Length(Result)<Width then
+    for i:= 1 to Width-Length(Result) do
+     Result:=Result+' ';
+  end;
+ begin
+  if sizeT>0 then
+   for i:= 0 to sizeT-1 do
+    begin
+     tmp:='';
+     for j:= 0 to sizeT-1 do
+      begin
+       cw:=GetColWidth(j);
+       tmp:=tmp+FloatToStrFW(M[i,j],cw)+' ';
+      end;
+     WriteLog('| ' + tmp + '|');
+    end;
+ end;
+ function Det(Matrix:TExtArr):Extended;
+ var
+  L,x:Integer;
+  SubMatrix:TExtArr;
+  procedure FillSubMatrix(num:Integer);
+  var
+   i,j:Integer;
+  begin
+   for i:= 1 to L-1 do
+   for j:= 0 to L-1 do
+    if j<>num then
+     begin
+      if j<num then
+       SubMatrix[i-1,j]:=Matrix[i,j]
+      else
+       SubMatrix[i-1,j-1]:=Matrix[i,j];
+     end;
+  end;
+ begin
+  L:=Length(Matrix);
+  case L of
+   0: Result:=0;
+   1: Result:=Matrix[0,0];
+   2: Result:=Matrix[0,0]*Matrix[1,1] - Matrix[1,0]*Matrix[0,1];
+   else
+    begin
+     SetLength(SubMatrix,L-1,L-1);
+     Result:=0;
+     for x:= 0 to L-1 do
+      begin
+       FillSubMatrix(x);
+       Result:=Result+Power(-1,x)*Matrix[0,x]*Det(SubMatrix);
+      end;
+    end;
+  end;
+ end;
+begin
+ scc:=SubCommandCount(SubCommand);
+ if scc>0 then
+  begin
+   size:=sqrt(scc);
+   if Frac(size)=0 then
+    begin
+     sizeT:=Trunc(size);
+     WriteLog('Матрица ' + IntToStr(sizeT)  + ' порядка');
+     FillMatrix;
+     PrintMatrix;
+     WriteLog('Det = ' + FloatToStr(Det(M)));
+    end;
+  end
+ else HelpHandler('det');
+end;
+
+procedure VKTryAnywayHandler(SubCommand:String);
+begin
+ TryVKImportAnyway:=True;
+ WriteLog('Медиаплаир попытается импортировать музыку из ВК.');
+end;
+
+procedure EnRuHandler(SubCommand:String);
+var
+ mode:Boolean;
+ str:String;
+ i,L:Integer;
+begin
+ //if SubCommandCount(SubCommand)>0 then
+  begin
+   str:=SubCommand;
+   L:=Length(str);
+   if L>0 then
+    begin
+     mode:=(str[1] in ['a'..'z']) or (str[1] in ['A'..'Z']) or (str[1] in ['[',']',';',#39,',','.','{','}',':','"','<','>']);
+     for i:= 1 to L do
+      if mode then
+       EnRu(str)
+      else
+       RuEn(str);
+     WriteLog(str);
+    end
+   else WriteLog('Строка пуста!');
+  end;
+end;
+
+procedure VKAccessTokenHandler(SubCommand:String);
+var
+ mode:Boolean;
+ nt:String;
+ i,L:Integer;
+begin
+  begin
+   nt:=SubCommand;
+   L:=Length(nt);
+   if L>0 then
+    begin
+     VKAuth:=True;
+     VKAccessToken:=nt;
+     WriteLog('AccessToken изменён.');
+    end
+   else WriteLog('Строка пуста!');
+  end;
+end;
+
+procedure VKPretendToBeAnOfficialAppHandler(SubCommand:String);
+var
+ mode:Boolean;
+ nt:String;
+ i,L:Integer;
+begin
+ VKPretendOfficial:=True;
+ VKAuth:=False;
+ WriteLog('Медиаплаир попробует притвориться официальным приложением VK для Android.');
+end;
+
+procedure HSDeckHandler(SubCommand:String);
+var
+ DS:String;
+ JP:TJSONParser;
+ CD:TJSONArray;
+ RawData:TByteArray;
+ DSInput:TByteArray;
+ DecodedData:array of Integer;
+ i,x:Integer;
+ buf,L,L2,L3,L4:Integer;
+ //crd:TCard;
+ lulkek:Boolean;
+ CDL,tmp:Integer;
+ procedure CleanUpDS(var DS:String);
+ var
+  i,L:Integer;
+ begin
+  DS:=Trim(DS);
+  L:=Length(DS);
+  if L>0 then
+   begin
+    i:=1;
+    repeat
+     if not (DS[i] in ['A'..'Z','a'..'z','0'..'9','+','/','=']) then
+      begin
+       Delete(DS,i,1);
+       i:=i-1;
+       L:=L-1;
+      end;
+     i:=i+1;
+    until i>L;
+   end;
+ end;
+ function FindCard(DBF:Integer):Integer;
+ var
+  j:Integer;
+ begin
+  Result:=-1;
+  {for j:= 0 to CDL-1 do
+   if CD.AsArray[j].I['dbfId']=DBF then
+    begin
+     Result:=j;
+     Exit;
+    end;}
+ end;
+ function GetClassNameByID(ID:Integer):String;
+ begin
+  //Result:=CD.AsArray[ID].S['cardClass'];
+ end;
+begin
+ FillChar(RawData,32768,1);
+ FillChar(DSInput,32768,1);
+ DS:=SubCommand;
+ CleanUpDS(DS);
+ for i:= 1 to Length(DS) do
+  DSInput[i-1]:=Ord(DS[i]);
+ B64.Base64Decode(DSInput,Length(DS),RawData);
+ SetLength(DecodedData,0);
+ i:=0;
+ repeat
+  SetLength(DecodedData,Length(DecodedData)+1);
+  DecodedData[Length(DecodedData)-1]:=ReadFromByteArr(RawData,i,buf);
+  i:=i+buf;
+ until (RawData[i]=1) and (RawData[i+1]=1) and (RawData[i+2]=1) and (RawData[i+3]=1) and (RawData[i+4]=1);
+ L:=Length(DecodedData);
+ if JSONCardData='' then
+  JSONCardData:=Form1.HTTP1.Get('http://somepony.space/hscards/');
+  //JSONCardData:=Form1.HTTP1.Get('https://api.hearthstonejson.com/v1/latest/ruRU/cards.json');
+ JSONCardData:=Copy(JSONCardData,4,Length(JSONCardData)-3);
+ JP:=TJSONParser.Create;
+ CD:=JP.ParseText(JSONCardData) as TJSONArray;
+ CDL:=CD.Count;
+ WriteLog(IntToStr(CDL));
+ if L>0 then
+  if DecodedData[0]=0 then // Резервный байт. Должен быть равен 0
+   if DecodedData[1]=1 then // Версия. Должна быть равна 1
+    begin
+     if DecodedData[2]=1 then // Формат колоды
+      WriteLog('Формат: Вольный')
+     else if DecodedData[2]=2 then
+      WriteLog('Формат: Стандартный')
+     else
+      WriteLog('Формат: Неизвестный');
+     if DecodedData[3]=1 then // Размер массива с героем. Должен быть равен 1
+      begin
+       tmp:=FindCard(DecodedData[4]);
+       if tmp<>-1 then // Узнаём класс колоды по герою
+        WriteLog('Класс: ' + GetClassNameByID(tmp))
+       else
+        WriteLog('Класс: Неизвестный');
+       L2:=DecodedData[5]; // Размер массива с картами, которых в колоде по 1 штуке
+       if L2>0 then
+        for i:= 6 to L2+5 do
+         //if GetCardByDBF(DecodedData[i],crd) then
+          //begin
+           //DL.Items.Add('('+IntToStr(crd.Manacost)+') ['+GetRarityAsOneChar(crd.Rarity)+'] ' + crd.Name + ' x1');
+           //AddCardToDeck(crd,1,False);
+          //end
+         //else
+          begin
+           //DL.Items.Add('НЕИЗВЕСТНО x1');
+           //AddUnknownCardToDeck(1,False,DecodedData[i]);
+          end;
+       //if L2<30 then
+        begin
+         L3:=DecodedData[6+L2]; // Размер массива с картами, которых в колоде по 2 штуки
+         if L3>0 then
+          for i:= 7+L2 to L3+L2+6 do
+           //if GetCardByDBF(DecodedData[i],crd) then
+            //begin
+             //DL.Items.Add('('+IntToStr(crd.Manacost)+') ['+GetRarityAsOneChar(crd.Rarity)+'] ' + crd.Name + ' x2');
+             //AddCardToDeck(crd,2,False);
+            //end
+           //else
+            begin
+             //DL.Items.Add('НЕИЗВЕСТНО x2');
+             //AddUnknownCardToDeck(2,False,DecodedData[i]);
+            end;
+         //if (L2+(L3*2))<30 then
+          begin
+           lulkek:=False;
+           L4:=DecodedData[7+L2+L3]; // Размер массива с картами, которых в колоде более 2 штук
+           if L4>0 then
+            for i:= 8+L2+L3 to (L4*2)+L3+L2+7 do
+             begin
+              if lulkek then
+               begin
+                lulkek:=False;
+                Continue;
+               end
+              else lulkek:=True;
+              //if GetCardByDBF(DecodedData[i],crd) then
+               //begin
+                //DL.Items.Add('('+IntToStr(crd.Manacost)+') ['+GetRarityAsOneChar(crd.Rarity)+'] ' + crd.Name + ' x' + IntToStr(DecodedData[i+1]));
+                //AddCardToDeck(crd,DecodedData[i+1],False);
+               //end
+              //else
+               begin
+                //DL.Items.Add('НЕИЗВЕСТНО x' + IntToStr(DecodedData[i+1]));
+                //AddUnknownCardToDeck(DecodedData[i+1],False,DecodedData[i]);
+               end;
+             end;
+          end;
+        end;
+      end;
+    end;
+end;
+
+procedure MCMHHandler(SubCommand:String);
+begin
+ MinecraftMacromodHook:=not MinecraftMacromodHook;
+ WriteLog('done');
+end;
+
+procedure TagHandler(SubCommand:String);
+var
+ resp:String;
+begin
+ resp:=TAGS_Read(MediaFile,PChar(SubCommand));
+ WriteLog(resp);
+end;
+
+procedure METARHandler(SubCommand:String);
+var
+ cmd,Station,resp:String;
+ cc:Integer;
+ function StationValid(s:String):Boolean;
+ begin
+  Result:=(Length(s)=4)  and
+          (s[1] in ['A'..'Z']) and
+          (s[2] in ['A'..'Z']) and
+          (s[3] in ['A'..'Z']) and
+          (s[4] in ['A'..'Z']);
+ end;
+begin
+ cc:=SubCommandCount(SubCommand);
+ if cc>0 then
+  begin
+   cmd:=ExtSubCommand(SubCommand,1,True);
+   if cmd='get' then
+    begin
+     if cc>1 then
+      begin
+       Station:=ExtSubCommand(SubCommand,2);
+       Station:=AnsiUpperCase(Station);
+       if StationValid(Station) then
+        begin
+         resp:=Form1.HTTP1.Get('https://avwx.rest/api/metar/'+Station);
+         WriteLog(resp);
+        end
+       else WriteLog('Код станции - 4 латинских символа!');
+      end
+     else WriteLog('Станция не указана!');
+    end;
+  end
+ else HelpHandler('metar');
+end;
+
+procedure DeleteElement(var anArray:TCustomChannels; const aPosition:integer);
+var
+   lg, j : integer;
+begin   
+   lg := length(anArray);
+   if aPosition > lg-1 then
+     exit
+   else if aPosition = lg-1 then begin //if is the last element
+           //if TSomeType is a TObject descendant don't forget to free it
+           //for example anArray[aPosition].free;
+           SetLength(anArray, lg-1);
+           exit;
+        end;
+   for j := aPosition to lg-2 do//we move all elements from aPosition+1 left...
+     anArray[j] := anArray[j+1];//...with a position
+   SetLength(anArray, lg-1);//now we have one element less
+   //that's all...
+end;
+
+procedure ChannelHandler(SubCommand:String);
+var
+ cc,cl,i,num:Integer;
+ cmd,ct,path:String;
+ cdata:BASS_CHANNELINFO;
+ tmp:HSTREAM;
+begin
+ cc:=SubCommandCount(SubCommand);
+ if cc>0 then
+  begin
+   cmd:=ExtSubCommand(SubCommand,1,True);
+   if cmd='list' then
+    begin
+     WriteLog('Каналы:');
+     if BASS_ChannelGetInfo(MediaFile,cdata) then
+      WriteLog('0 - '+cdata.filename)
+     else
+      WriteLog('0 - не используется');
+     cl:=Length(CustomChannels);
+     if cl>0 then
+      for i:= 0 to cl-1 do
+       if BASS_ChannelGetInfo(CustomChannels[i],cdata) then
+        WriteLog(IntToStr(i+1)+' - '+cdata.filename)
+       else
+        WriteLog(IntToStr(i+1)+' - не используется');
+    end
+   else if cmd='create' then
+    begin
+     if cc>2 then
+      begin
+       ct:=ExtSubCommand(SubCommand,2,True);
+       path:=ExtSubCommand(SubCommand,3);
+       if ct='file' then
+        begin
+         if FileExists(path) then
+          begin
+           cl:=Length(CustomChannels);
+           SetLength(CustomChannels,cl+1);
+           CustomChannels[cl]:=BASS_StreamCreateFile(False,PChar(path),0,0,0);
+           BASS_ChannelPlay(CustomChannels[cl],True);
+           WriteLog('Канал создан с номером '+IntToStr(cl+1));
+          end
+         else WriteLog('Файл не найден!');
+        end
+       else if ct='net' then
+        begin
+         cl:=Length(CustomChannels);
+         SetLength(CustomChannels,cl+1);
+         CustomChannels[cl]:=BASS_StreamCreateURL(PChar(path),0,0,nil,nil);
+         BASS_ChannelPlay(CustomChannels[cl],True);
+         WriteLog('Канал создан с номером '+IntToStr(cl+1));
+        end
+       else WriteLog('Неизвестная команда! Проверьте правильность ввода.');
+      end
+     else WriteLog('Недостаточно параметров!');
+    end
+   else if cmd='delete' then
+    begin
+     if cc>1 then
+      begin
+       num:=StrToIntDef(ExtSubCommand(SubCommand,2),-1);
+       if num=0 then WriteLog('Удаление нулевого канала напрямую невозможно. Поменяйте его местами с другим каналом.')
+       else if num>0 then
+        begin
+         cl:=Length(CustomChannels);
+         if cl>0 then
+          begin
+           num:=num-1;
+           if num<cl then
+            begin
+             BASS_ChannelStop(CustomChannels[num]);
+             BASS_StreamFree(CustomChannels[num]);
+             DeleteElement(CustomChannels,num);
+             WriteLog('Канал удалён.');
+            end
+           else WriteLog('Неверный номер канала. Проверьте правильность ввода.');
+          end
+         else WriteLog('Нет ни одного дополнительного канала.');
+        end
+       else WriteLog('Неверный номер канала. Проверьте правильность ввода.');
+      end
+     else WriteLog('Недостаточно параметров!');
+    end
+   else if cmd='switch' then
+    begin
+     if cc>1 then
+      begin
+       num:=StrToIntDef(ExtSubCommand(SubCommand,2),-1);
+       if num=0 then WriteLog('Менять канал местами сам с собой не требуется.')
+       else if num>0 then
+        begin
+         cl:=Length(CustomChannels);
+         if cl>0 then
+          begin
+           num:=num-1;
+           if num<cl then
+            begin
+             tmp:=CustomChannels[num];
+             CustomChannels[num]:=MediaFile;
+             MediaFile:=tmp;
+             Form1.PlayFile(False,True);
+             WriteLog('Обмен завершён.');
+            end
+           else WriteLog('Неверный номер канала. Проверьте правильность ввода.');
+          end
+         else WriteLog('Нет ни одного дополнительного канала.');
+        end
+       else WriteLog('Неверный номер канала. Проверьте правильность ввода.');
+      end
+     else WriteLog('Недостаточно параметров!');
+    end
+   else WriteLog('Неизвестная команда! Проверьте правильность ввода.');
+  end
+ else HelpHandler('channel');
+end;
+
+procedure TForm12.EWriteLog(Str:String);
+begin
+ WriteLog(Str);
+end;
+
+procedure TForm12.ERawWriteLog(Str:String);
+begin
+ RawWriteLog(Str);
+end;
+
+procedure TForm12.EWriteLogStyle(Str:String;Style:TFontStyles;Color:TColor);
+begin
+ WriteLogStyle(Str,Style,Color);
+end;
+
+procedure TForm12.EWriteLogStyleExtended(Str:String;Styles:TStyles);
+begin
+ WriteLogStyleExtended(Str,Styles);
+end;
+
+procedure TForm12.InitCommands;
+begin
+ AddCommand('help',HelpHandler,'Помощь по командам консоли.','Попозже напишу развёрнуто.');
+ AddCommand('plist',PlistHandler,'Управление плейлистом.','Попозже напишу развёрнуто.');
+ AddCommand('test',TestHandler,'Тестовая команда.','Команда для тестирования консоли на этапе разработки. Более не имеет практической пользы.');
+ AddCommand('removecmd',RemoveCmdHandler,'Удаление команд.','Удаляет команды в текущей сессии.' + #13 + 'Использование: removecmd [cmd1] <cmd2> <cmd3>...');
+ AddCommand('hash',HashHandler,'Хеширование файлов и строк различными алгоритмами.','Хеширование файлов и строк различными алгоритмами.' + #13#13 + 'Использование 1: hash [a] [file path/string] <file path/string> <file path/string>...' + #13 + 'file path/string - путь к файлу или строка. Если по указанному пути файл будет не найден, он будет обработан как строка.' + #13 + 'Обратите внимание, что хеширование больших файлов может занять длительное время.' + #13 + 'a - алгоритм хеширования. Может принимать следующие значения: ' + #13 + ' sha512' + #13 + ' sha384' + #13 + ' sha256' + #13 + ' sha1' + #13 + ' md4' + #13 + ' md5' + #13 + ' haval' + #13 + ' ripemd128' + #13 + ' ripemd160' + #13 + ' tiger' + #13#13 + 'Использование 2: hash stop' + #13 + 'Остановить хэширование.');
+ CommandsCount:=59;
+ SetLength(Commands,CommandsCount);
+ Commands[5].Name:='exit';
+ Commands[5].Handler:=ExitHandler;
+ Commands[5].ShortDesc:='Закрывает плаир.';
+ Commands[5].LongDesc:='Закрывает плаир.';
+ Commands[6].Name:='close';
+ Commands[6].Handler:=CloseHandler;
+ Commands[6].ShortDesc:='Закрывает консоль.';
+ Commands[6].LongDesc:='Закрывает консоль.';
+ Commands[7].Name:='restart';
+ Commands[7].Handler:=RestartHandler;
+ Commands[7].ShortDesc:='Перезапуск плаира.';
+ Commands[7].LongDesc:='Перезапуск плаира.';
+ Commands[8].Name:='whvideo';
+ Commands[8].Handler:=WHvideoHandler;
+ Commands[8].ShortDesc:='Подгонка размеров видео по пропорциям.';
+ Commands[8].LongDesc:='Подгонка размеров видео по пропорциям.' + #13 + 'Использование: whvideo [Width] [Height] [DestinationWidth] [DestinationHeight]' + #13#13 + 'Два параметра ширины и высоты можно заменить константой:' + #13 + 'hd - 1280x720' + #13 + 'fullhd - 1920x1080' + #13 + '4k - 3840x2160' + #13 + '8k - 7680x4320' + #13 + '16k - 15360x8640' + #13#13 + 'Например команда "whvideo 500 600 fullhd" эквивалентна команде "whvideo 500 600 1920 1080"';
+ Commands[9].Name:='time';
+ Commands[9].Handler:=TimeHandler;
+ Commands[9].ShortDesc:='Текущие дата и время.';
+ Commands[9].LongDesc:='Текущие дата и время.';
+ Commands[10].Name:='systeminfo';
+ Commands[10].Handler:=SystemInfoHandler;
+ Commands[10].ShortDesc:='Информация о системе.';
+ Commands[10].LongDesc:='Информация о системе.';
+ Commands[11].Name:='cmdtofile';
+ Commands[11].Handler:=CmdToFileHandler;
+ Commands[11].ShortDesc:='Выполнение команды и запись результата в файл.';
+ Commands[11].LongDesc:='Выполнение команды и запись результата в файл.' + #13 + 'Использование: cmdtofile [FilePath] [command] <attr1> <attr2>...';
+ Commands[12].Name:='timer';
+ Commands[12].Handler:=TimerHandler;
+ Commands[12].ShortDesc:='Выключение по таймеру.';
+ Commands[12].LongDesc:='Выключение плаира по таймеру. (Или другое действие, выбранное в меню "После завершения воспроизведения")' + #13#13 + 'Использование 1: timer' + #13 + 'Проверка статуса таймера. Включен или нет, и если включен, сколько времени осталось.' + #13#13 + 'Использование 2: timer stop' + #13 + 'Остановка таймера.' + #13#13 + 'Использование 3: timer resume' + #13 + 'Возобновление таймера.' + #13#13 + 'Использование 4: timer [time] <metrics> <time2> <metrics>...' + #13 + 'Установка таймера. time - время. По умолчанию задаётся в секундах, но это можно изменить указав необязательный параметр metrics. Он может принимать следущие значения: ' + #13 + ' s - секунды' + #13 + ' m - минуты' + #13 + ' h - часы' + #13 + ' d - сутки' + #13 + 'Можно указать несколько значений времени, тогда они суммируются. Например: timer 2 h 30 m' + #13 + 'Так же обратите внимание, что metrics необязательный параметр. То есть, можно написать и так: timer 3 h 40 43 64 21 m 40 m 43 59';
+ Commands[13].Name:='hscrl';
+ Commands[13].Handler:=hscrlHandler;
+ Commands[13].ShortDesc:='Переключение горизонтальной прокрутки.';
+ Commands[13].LongDesc:='Переключение горизонтальной прокрутки.';
+ Commands[14].Name:='clear';
+ Commands[14].Handler:=ClearHandler;
+ Commands[14].ShortDesc:='Очистка консоли.';
+ Commands[14].LongDesc:='Очистка консоли.';
+ Commands[15].Name:='title';
+ Commands[15].Handler:=TitleHandler;
+ Commands[15].ShortDesc:='Задание заголовка окна консоли.';
+ Commands[15].LongDesc:='Задание заголовка окна консоли.';
+ Commands[16].Name:='about';
+ Commands[16].Handler:=AboutHandler;
+ Commands[16].ShortDesc:='О программе.';
+ Commands[16].LongDesc:='О программе.';
+ Commands[17].Name:='restorewinvol';
+ Commands[17].Handler:=RestoreWinVolHandler;
+ Commands[17].ShortDesc:='Восстановление общего уровня звука в Windows после закрытия плаира.';
+ Commands[17].LongDesc:='Восстановление общего уровня звука в Windows после закрытия плаира.' + #13#13 + 'Использование 1: restorewinvol [value]' + #13 + 'Установить общий уровень громкости Windows на указанное значение после закрытия плаира. value - значение от 0 до 100' + #13#13 + 'Использование 2: restorewinvol clear' + #13 + 'Не менять уровень громкости';
+ Commands[18].Name:='remote';
+ Commands[18].Handler:=WebFaceHandler;
+ Commands[18].ShortDesc:=APP_NAME + ' Remote. [ALPHA]';
+ Commands[18].LongDesc:=APP_NAME + ' Remote. [ALPHA]' + #13#13 + 'Использование 1: remote [Port]' + #13 + 'Запустить Remote на указанном порту.' + #13#13 + 'Использование 2: remote stop' + #13 + 'Отключить Remote.';
+ Commands[19].Name:='dinfo';
+ Commands[19].Handler:=DInfoHandler;
+ Commands[19].ShortDesc:='Информация об устройстве воспроизведения. [DEBUG]';
+ Commands[19].LongDesc:='Информация об устройстве воспроизведения. [DEBUG]';
+ Commands[20].Name:='setwinvol';
+ Commands[20].Handler:=SetWinVolHandler;
+ Commands[20].ShortDesc:='Установка общего уровня звука в Windows.';
+ Commands[20].LongDesc:='Установка общего уровня звука в Windows.' + #13#13 + 'Использование: setwinvol [value]' + #13 + 'Установить общий уровень громкости Windows на указанное значение. value - значение от 0 до 100';
+ Commands[21].Name:='qe';
+ Commands[21].Handler:=QEHandler;
+ Commands[21].ShortDesc:='Решение квадратного уравнения.';
+ Commands[21].LongDesc:='Решение квадратного уравнения.' + #13#13 + 'Использование: qe [a] [b] [c]';
+ Commands[22].Name:='setspecmode';
+ Commands[22].Handler:=SetSpecModeHandler;
+ Commands[22].ShortDesc:='Установка конкретного режима визуализации.';
+ Commands[22].LongDesc:='Установка конкретного режима визуализации.' + #13#13 + 'Использование: setspecmode [ID]' + #13 + 'ID - номер режима визуализации. Значения: от 0 до ' + IntToStr(SPEC_MODES_COUNT-1) + '.' + #13#13 + '0 - Спектрограф' + #13 + '1 - Логарифмический спектр' + #13 + '2 - Спектрограмма' + #13 + '3 - Осциллоскоп' + #13 + '4 - Настраеваемый осциллоскоп';
+ Commands[23].Name:='warmup';
+ Commands[23].Handler:=WarmUpHandler;
+ Commands[23].ShortDesc:='Разогрев процессора, путём загрузки его на 100%.';
+ Commands[23].LongDesc:='Разогрев процессора, путём загрузки его на 100%.' + #13#13 + 'Использование: warmup [CMD]' + #13 + 'Значения CMD:' + #13 + 'start - Начать разогрев' + #13 + 'stop - Закончить разогрев';
+ Commands[24].Name:='var';
+ Commands[24].Handler:=VarHandler;
+ Commands[24].ShortDesc:='Управление переменными.';
+ Commands[24].LongDesc:='Управление переменными. get, set, list. Ну ты понял.';
+ Commands[25].Name:='batteryinfo';
+ Commands[25].Handler:=BatteryInfoHandler;
+ Commands[25].ShortDesc:='Информация о батарее.';
+ Commands[25].LongDesc:='Информация о батарее.';
+ Commands[26].Name:='roll';
+ Commands[26].Handler:=RollHandler;
+ Commands[26].ShortDesc:='Выбить случайное число.';
+ Commands[26].LongDesc:='Выбивает случайное число.' + #13#13 + 'Использование 1: roll' + #13 + 'Случайное число в диапазоне от 1 до 100' + #13#13 + 'Использование 2: roll [x]' + #13 + 'Случайное число в диапазоне от 1 до x' + #13#13 + 'Использование 3: roll [x] [y]' + #13 + 'Случайное число в диапазоне от x до y' + #13#13 + 'Можно вводить отрицательные числа';
+ Commands[27].Name:='startin';
+ Commands[27].Handler:=StartInHandler;
+ Commands[27].ShortDesc:='Начало воспроизведения по таймеру.';
+ Commands[27].LongDesc:='Начало воспроизведения по таймеру.' + #13#13 + 'Использование: startin [time] <metrics> <time2> <metrics>...' + #13 + 'Установка таймера на начало воспроизведения. time - время. По умолчанию задаётся в секундах, но это можно изменить указав необязательный параметр metrics. Он может принимать следущие значения: ' + #13 + ' s - секунды' + #13 + ' m - минуты' + #13 + ' h - часы' + #13 + ' d - сутки' + #13 + 'Можно указать несколько значений времени, тогда они суммируются. Например: startin 2 h 30 m' + #13 + 'Так же обратите внимание, что metrics необязательный параметр. То есть, можно написать и так: startin 30 2 m';
+ Commands[28].Name:='getcmdaddr';
+ Commands[28].Handler:=GetCmdAddrHandler;
+ Commands[28].ShortDesc:='Получить адрес обработчика команды.';
+ Commands[28].LongDesc:='Получить адрес обработчика команды.' + #13 + 'Используя эту команду убедитесь в том, что вы точно знаете, что делаете.';
+ Commands[29].Name:='setcmdaddr';
+ Commands[29].Handler:=SetCmdAddrHandler;
+ Commands[29].ShortDesc:='Изменить адрес обработчика команды.';
+ Commands[29].LongDesc:='Изменить адрес обработчика команды.' + #13 + 'Используя эту команду убедитесь в том, что вы точно знаете, что делаете.';
+ Commands[30].Name:='setvolume';
+ Commands[30].Handler:=SetVolumeHandler;
+ Commands[30].ShortDesc:='Изменить громкость воспроизведения.';
+ Commands[30].LongDesc:='Изменить громкость воспроизведения.' + #13#13 + 'Использование: setvolume [Level]' + #13 + 'Установка громкости воспроизведения на заданный уровень.' + #13 + 'Level может принимать значения от 0 до 1000.';
+ Commands[31].Name:='setplayspeed';
+ Commands[31].Handler:=SetPlaySpeedHandler;
+ Commands[31].ShortDesc:='Изменить скорость воспроизведения.';
+ Commands[31].LongDesc:='Изменить скорость воспроизведения.' + #13#13 + 'Использование: setplayspeed [Level]' + #13 + 'Установка скорости воспроизведения на заданный уровень.' + #13 + 'Level может принимать значения 0 или от 100 до 100000.' + #13 + '(0 - нормальная скорость)';
+ Commands[32].Name:='setbalance';
+ Commands[32].Handler:=SetBalanceHandler;
+ Commands[32].ShortDesc:='Изменить баланс левого и правого каналов.';
+ Commands[32].LongDesc:='Изменить баланс левого и правого каналов.' + #13#13 + 'Использование: setbalance [Level]' + #13 + 'Установка баланса левого и правого каналов на заданный уровень.' + #13 + 'Level может принимать значения от -1000 до 1000.';
+ Commands[33].Name:='setplaydevice';
+ Commands[33].Handler:=SetPlayDeviceHandler;
+ Commands[33].ShortDesc:='Сменить устройство воспроизведения (если у вас их несколько).';
+ Commands[33].LongDesc:=MakeLongDescStringForSetPlayDeviceCmd;
+ Commands[34].Name:='togglereverb';
+ Commands[34].Handler:=ToggleReverbHandler;
+ Commands[34].ShortDesc:='Вкл/выкл эффект реверберации.';
+ Commands[34].LongDesc:='Вкл/выкл эффект реверберации.';
+ Commands[35].Name:='rewind';
+ Commands[35].Handler:=RewindHandler;
+ Commands[35].ShortDesc:='Перемотка воспроизводимого файла вперёд, назад или на конкретную позицию.';
+ Commands[35].LongDesc:='Перемотка воспроизводимого файла вперёд, назад или на конкретную позицию.' + #13#13 + 'Использование: rewind <+/->[num]<%>' + #13 + 'num - число' + #13#13 + 'Примеры:' + #13#13 + 'rewind 20 - перемотка на 20-ю секунду' + #13 + 'rewind +10 - перемотка на 10 секунд вперёд' + #13 + 'rewind -10 - перемотка на 10 секунд назад' + #13 + 'rewind 50% - перемотка на 50-й процент' + #13 + 'rewind +20% - перемотка на 20 процентов вперёд' + #13 + 'rewind -10% - перемотка на 10 процентов назад';
+ Commands[36].Name:='addcmd';
+ Commands[36].Handler:=AddCmdHandler;
+ Commands[36].ShortDesc:='Добавление команд.';
+ Commands[36].LongDesc:='Добавляет команды в текущей сессии.' + #13#13 + 'Использование: addcmd [name] [addr] [sd] [ld]' + #13 + 'name - Название команды. Не должно совпадать с уже существующими.' + #13 + 'addr - Адрес процедуры-обработчика команды. Задать в десятичном виде.' + #13 + 'sd - Краткое описание. Выводится в списке команд (help).' + #13 + 'ld - Подробное описание. Выводится при запросе подробного описания командой help';
+ Commands[37].Name:='stats';
+ Commands[37].Handler:=StatsHandler;
+ Commands[37].ShortDesc:='Статистика.';
+ Commands[37].LongDesc:='Статистика.' + #13#13 + 'Использование 1: stats' + #13 + 'Вывод статистики' + #13#13 + 'Использование 2: stats clear' + #13 + 'Обнулить статистику';
+ Commands[38].Name:='dropchan';
+ Commands[38].Handler:=DropChanHandler;
+ Commands[38].ShortDesc:='Сбросить текущий канал воспроизведения.';
+ Commands[38].LongDesc:='Сбросить текущий канал воспроизведения..' + #13#13 + 'Использование: dropchan';
+ Commands[39].Name:='rdinfo';
+ Commands[39].Handler:=RDInfoHandler;
+ Commands[39].ShortDesc:='Информация об устройстве записи. [DEBUG]';
+ Commands[39].LongDesc:='Информация об устройстве записи. [DEBUG]';
+ Commands[40].Name:='riinfo';
+ Commands[40].Handler:=RIInfoHandler;
+ Commands[40].ShortDesc:='Информация об источнике записи. [DEBUG]';
+ Commands[40].LongDesc:='Информация об источнике записи. [DEBUG]';
+ Commands[41].Name:='wadinfo';
+ Commands[41].Handler:=WADInfoHandler;
+ Commands[41].ShortDesc:='Информация об устройстве WASAPI. [DEBUG]';
+ Commands[41].LongDesc:='Информация об устройстве WASAPI. [DEBUG]';
+ Commands[42].Name:='wasinfo';
+ Commands[42].Handler:=WASInfoHandler;
+ Commands[42].ShortDesc:='Информация о WASAPI. [DEBUG]';
+ Commands[42].LongDesc:='Информация о WASAPI. [DEBUG]';
+ Commands[43].Name:='window';
+ Commands[43].Handler:=WindowHandler;
+ Commands[43].ShortDesc:='Операции с окошками.';
+ Commands[43].LongDesc:='Операции с окошками.' + #13#13 + 'Использование 1: window update' + #13 + 'Обновление списка окон. Необходимо использовать перед другими операциями.' + #13#13 + 'Использование 2: window list' + #13 + 'Вывод полного списка окон.' + #13#13 + 'Использование 3: window search [str]' + #13 + 'Поиск окна по заголовку.' + #13 + 'str - Строка поиска. Можно писать не полностью.' + #13#13 + 'Использование 4: window hide [wnum]' + #13 + 'Скрыть окно.' + #13 + 'wnum - Номер окна.' + #13#13 + 'Использование 5: window show [wnum]' + #13 + 'Показать окно.' + #13 + 'wnum - Номер окна.' + #13#13 + 'Использование 6: window rename [wnum] [name]' + #13 + 'Изменить заголовок окна.' + #13 + 'wnum - Номер окна.' + #13 + 'name - Новый заголовок.' + #13#13 + 'Использование 7: window alpha [wnum] [level]' + #13 + 'Установить уровень непрозрачности окна.'
+  + #13 + 'wnum - Номер окна.' + #13 + 'level - Уровень от 0 до 255. (0 - полностью прозрачное, 255 - полностью непрозрачное).' + #13#13 + 'Использование 8: window move [wnum] [x] [y]' + #13 + 'Переместить окно на указанные координаты (указываются координаты верхнего левого угла).' + #13 + '(Точка (0,0) - верхний левый угол экрана)' + #13 + 'wnum - Номер окна.' + #13 + 'x - Координата по оси X.' + #13 + 'y - Координата по оси Y.' + #13#13 + 'Использование 9: window resize [wnum] [width] [height]' + #13 + 'Изменить размер окна на указанный.' + #13 + 'wnum - Номер окна.' + #13 + 'width - Ширина.' + #13 + 'height - Высота.';
+ Commands[44].Name:='geterrorlog';
+ Commands[44].Handler:=GetErrorLogHandler;
+ Commands[44].ShortDesc:='Показать лог ошибок.';
+ Commands[44].LongDesc:='Показать лог ошибок.';
+ Commands[45].Name:='writeerrorlog';
+ Commands[45].Handler:=WriteErrorLogHandler;
+ Commands[45].ShortDesc:='Сделать запись в лог ошибок.';
+ Commands[45].LongDesc:='Сделать запись в лог ошибок.';
+ Commands[46].Name:='flood';
+ Commands[46].Handler:=FloodHandler;
+ Commands[46].ShortDesc:='Создать файл указанного размера.';
+ Commands[46].LongDesc:='Создать файл указанного размера.' + #13#13 + 'Использование: flood [path] [size] <metrics>' + #13 + 'path - Путь к файлу.' + #13 + 'size - Размер файла. (По-умолчанию задаётся в байтах)' + #13 + 'metrics - ед. измерения. Значения:' + #13 + ' k - килобайт' + #13 + ' m - мегабайт' + #13 + ' g - гигабайт' + #13 + 'Если параметр не указан или указан неверно, то считается, что размер задан в байтах.';
+ Commands[47].Name:='osd';
+ Commands[47].Handler:=OSDHandler;
+ Commands[47].ShortDesc:='Управление OSD.';
+ Commands[47].LongDesc:='Управление OSD.' + #13#13 + 'Использование 1: osd settext [text]' + #13 + 'Установить текст OSD.' + #13#13 + 'Использование 2: osd gettext' + #13 + 'Показать текст OSD.' + #13#13 + 'Использование 3: osd show' + #13 + 'Показать OSD.';
+ Commands[48].Name:='logvkapi';
+ Commands[48].Handler:=LogVKAPIHandler;
+ Commands[48].ShortDesc:='Переключение вывода ответов VKAPI в консоль.';
+ Commands[48].LongDesc:='Переключение вывода ответов VKAPI в консоль.';
+ Commands[49].Name:='det';
+ Commands[49].Handler:=DetHandler;
+ Commands[49].ShortDesc:='Определитель матрицы.';
+ Commands[49].LongDesc:='Определитель матрицы.';
+ Commands[50].Name:='vktryanyway';
+ Commands[50].Handler:=VKTryAnywayHandler;
+ Commands[50].ShortDesc:='Попробовать наплевать на ограничения.';
+ Commands[50].LongDesc:='Попробовать наплевать на ограничения.';
+ Commands[51].Name:='enru';
+ Commands[51].Handler:=EnRuHandler;
+ Commands[51].ShortDesc:='Перевести текст из неправильной раскладки.';
+ Commands[51].LongDesc:='Перевести текст из неправильной раскладки.';
+ Commands[52].Name:='vkaccesstoken';
+ Commands[52].Handler:=VKAccessTokenHandler;
+ Commands[52].ShortDesc:='Принудительно назначить указанный токен для VK API.';
+ Commands[52].LongDesc:='Принудительно назначить указанный токен для VK API.';
+ Commands[53].Name:='vkpretendtobeanofficialapp';
+ Commands[53].Handler:=VKPretendToBeAnOfficialAppHandler;
+ Commands[53].ShortDesc:='Притвориться официальным приложением VK для Android.';
+ Commands[53].LongDesc:='Притвориться официальным приложением VK для Android.';
+ Commands[54].Name:='hsdeck';
+ Commands[54].Handler:=HSDeckHandler;
+ Commands[54].ShortDesc:='Прочитать deckstring.';
+ Commands[54].LongDesc:='Прочитать deckstring.';
+ Commands[55].Name:='mcmh';
+ Commands[55].Handler:=MCMHHandler;
+ Commands[55].ShortDesc:='Вывод названия текущего трека в чате Minecraft, при условии установленного Macro Mod.';
+ Commands[55].LongDesc:='Вывод названия текущего трека в чате Minecraft, при условии установленного Macro Mod.';
+ Commands[56].Name:='tag';
+ Commands[56].Handler:=TagHandler;
+ Commands[56].ShortDesc:='Tags.';
+ Commands[56].LongDesc:='Tags.'+#13#13+'%TITL  - название'+#13+'%ARTI  - исполнитель'+#13+'%ALBM  - альбом'+#13+'%GNRE  - жанр'+#13+'%YEAR  - год'+#13+'%CMNT  - комментарий'+#13+'%TRCK  - номер трека'+#13+'%COMP  - композитор'+#13+'%COPY  - копирайт'+#13+'%SUBT  - субтитры'+#13+'%AART  - исполнитель альбома'+#13+'%DISC  - номер диска';
+ Commands[57].Name:='metar';
+ Commands[57].Handler:=METARHandler;
+ Commands[57].ShortDesc:='Получение и расшифровка данных METAR.';
+ Commands[57].LongDesc:='Получение и расшифровка данных METAR.'+#13+'Для получения данных нужен интернет!';
+ Commands[58].Name:='channel';
+ Commands[58].Handler:=ChannelHandler;
+ Commands[58].ShortDesc:='Работа с каналами.';
+ Commands[58].LongDesc:='Работа с каналами.'+#13#13+'Сам по себе плаир работает только с одним каналом и не воспроизводит несколько треков одновременно.'+#13+'С помощью этой команды вы можете заставить его делать это.'+#13#13+'Использование: channel [cmd] <args>'+#13+'cmd - Команда.'+#13+'args - Её аргументы.'+#13#13+'Список команд и аргументов:'+#13+'list - Список каналов.'+#13+' Аргументов нет. Показывает список существующих каналов.'+#13+' Канал под номером 0 - управляется плаиром. Существует всегда, удаление напрямую невозможно.'+#13+' * Можно удалить, если поменять местами с другим каналом.'+#13#13+'create - Создать канал. Аргументы:'+#13+' type - Тип канала. file - файл на компьютере, net - файл или поток в интернете.'+#13+' path - абсолютный путь к файлу или потоку.'+#13#13+'delete - Удалить поток. Аргументы:'+#13+' num - Номер потока. Можно уточнить командой channel list.'+#13#13+'switch - Поменять поток местами с нулевым. Аргументы:'+#13;
+ Commands[58].LongDesc:=Commands[58].LongDesc+' num - Номер потока. Можно уточнить командой channel list.'+#13+' * Поток num перейдёт под управление плаиру, а текущий нулевой поток встанет на номер num.';
+end;
+
+procedure TForm12.RemakeSortedCmdList;
+var
+ i,L:Integer;
+begin
+ L:=Length(Commands);
+ if L>0 then
+  begin
+   SortedCmdList.Clear;
+   for i:= 0 To L-1 Do
+    SortedCmdList.Add(Commands[i].Name);
+   SortedCmdList.Sort;
+  end;
+end;
+
+function TForm12.AddCommand(Cmd:TCommand):Boolean;
+var
+ L,i:Integer;
+begin
+ Cmd.Name:=LowerCase(Trim(Cmd.Name));
+ L:=Length(Commands);
+ for i:= 0 To L-1 Do
+  if Commands[i].Name=Cmd.Name then
+   begin
+    Result:=False;
+    Exit;
+   end;
+ CommandsCount:=L+1;
+ SetLength(Commands,CommandsCount);
+ Commands[L]:=Cmd;
+ RemakeSortedCmdList;
+ Result:=True;
+end;
+
+function TForm12.AddCommand(Name:String;Handler:TCommandHandler;ShortDesc,LongDesc:String;ExternalProc:Boolean=False;ExternalHandler:TExternalHandler=nil):Boolean;
+var
+ tmpc:TCommand;
+begin
+ tmpc.Name:=Name;
+ tmpc.Handler:=Handler;
+ tmpc.ShortDesc:=ShortDesc;
+ tmpc.LongDesc:=LongDesc;
+ tmpc.ExternalProc:=ExternalProc;
+ tmpc.ExternalHandler:=ExternalHandler;
+ Result:=AddCommand(tmpc);
+end;
+
+function TForm12.RemoveCommand(Name:String):Boolean;
+var
+ i,j,L:Integer;
+begin
+ Result:=False;
+ L:=Length(Commands);
+ Name:=LowerCase(Trim(Name));
+ if L>0 then
+  for i:= 0 To L-1 Do
+   if Commands[i].Name=Name then
+    begin
+     for j:= i To L-2 Do
+      Commands[j]:=Commands[j+1];
+     CommandsCount:=L-1;
+     SetLength(Commands,CommandsCount);
+     Result:=True;
+     RemakeSortedCmdList;
+     Exit;
+    end;
+end;
+
+function TForm12.GetCommandID(Cmd:String):Integer;
+var
+ i:Integer;
+begin
+ Result:=-1;
+ for i:= 0 To Length(Commands)-1 Do
+  if Cmd=Commands[i].Name then
+   if not InCommandsBlacklist(Cmd) then
+    begin
+     Result:=i;
+     Exit;
+    end
+   else
+    begin
+     Result:=-2;
+     Exit;
+    end;
+end;
+
+function TForm12.NormalizeSemicolons(RawCommand:String):String;
+var
+ i,L:Integer;
+ IgnoreSemicolon:Boolean;
+begin
+ RawCommand:=Trim(RawCommand);
+ L:=Length(RawCommand);
+ IgnoreSemicolon:=False;
+ if L>0 then
+  begin
+   i:=0;
+   repeat
+    i:=i+1;
+    if RawCommand[i]='"' then
+     IgnoreSemicolon:=not IgnoreSemicolon;
+    if (RawCommand[i]=';') and (not IgnoreSemicolon) then
+     if RawCommand[i+1]=';' then
+      begin
+       Delete(RawCommand,i,1);
+       i:=i-1;
+       L:=L-1;
+     end;
+   until i=L;
+   if RawCommand[L]=';' then Delete(RawCommand,L,1);
+   if RawCommand[1]=';' then Delete(RawCommand,1,1);
+  end;
+ Result:=RawCommand;
+end;
+
+function TForm12.GetRawCommandsCount(RawCommand:String):Integer;
+var
+ i,L:Integer;
+ IgnoreSemicolon:Boolean;
+begin
+ Result:=0;
+ L:=Length(RawCommand);
+ IgnoreSemicolon:=False;
+ if L>0 then
+  begin
+   Result:=1;
+   for i:= 1 To L Do
+    begin
+     if RawCommand[i]='"' then
+      IgnoreSemicolon:=not IgnoreSemicolon;
+     if (RawCommand[i]=';') and (not IgnoreSemicolon) then
+      Result:=Result+1;
+    end;
+  end;
+end;
+
+function TForm12.GetRawCommandPos(RawCommand:String;Num:Integer):Integer;
+var
+ i,L,count:Integer;
+ IgnoreSemicolon:Boolean;
+begin
+ count:=0;
+ Result:=0;
+ L:=Length(RawCommand);
+ IgnoreSemicolon:=False;
+ if L>0 then
+  begin
+   if Num=1 then
+    begin
+     Result:=1;
+     Exit;
+    end
+   else
+    for i:= 1 To L Do
+     begin
+      if RawCommand[i]='"' then
+       IgnoreSemicolon:=not IgnoreSemicolon;
+      if (RawCommand[i]=';') and (not IgnoreSemicolon) then
+       begin
+        count:=count+1;
+        if count=Num-1 then
+         begin
+          Result:=i+1;
+          Exit;
+         end;
+       end;
+     end;
+  end;
+end;
+
+function TForm12.ExtRawCommand(RawCommand:String;Num:Integer):String;
+var
+ start,i,L:Integer;
+ IgnoreSemicolon:Boolean;
+begin
+ start:=GetRawCommandPos(RawCommand,Num);
+ IgnoreSemicolon:=False;
+ L:=Length(RawCommand);
+ for i:= start To L Do
+  begin
+   if RawCommand[i]='"' then
+    IgnoreSemicolon:=not IgnoreSemicolon;
+   if ((RawCommand[i]=';') and (not IgnoreSemicolon)) or (i=L) then
+    begin
+     Result:=Trim(Copy(RawCommand,start,i-start+1));
+     if Length(Result)>0 then
+      if Result[Length(Result)]=';' then Delete(Result,Length(Result),1);
+     Exit;
+    end;
+  end;
+end;
+
+procedure TForm12.ParseCommand(RawCommand:String;History:Boolean=False);
+var
+ MainCommand,SubCommand,Hashed:String;
+ i,L,CommandID,C:Integer;
+ es:TStyles;
+begin
+ if History then AddHistory(RawCommand);
+ SetLength(es,2);
+ es[0].Start:=0;
+ es[0].Length:=1;
+ es[0].Style:=[fsBold];
+ es[0].Color:=clRed;
+ es[1].Start:=2;
+ es[1].Length:=Length(RawCommand);
+ es[1].Style:=[];
+ es[1].Color:=clGreen;
+ L:=Length(RawCommand);
+ i:=0;
+ repeat
+  i:=i+1;
+ until (RawCommand[i]=' ') or (i=L);
+ if i<L then
+  begin
+   SetLength(es,3);
+   es[1].Length:=i;
+   es[2].Start:=i+1;
+   es[2].Length:=Length(RawCommand)-i+1;
+   es[2].Style:=[];
+   es[2].Color:=clPurple;
+  end;
+ WriteLogStyleExtended('> ' + RawCommand,es);
+ Hashed:=SHA512(RawCommand);
+ if Hashed='D9AF677225FEE2AA21CBAAD82005B6EC58E0C4D61464301058F22E40434E9F4238A12C838501A1C6241900FC4FBCA2AC3ADD41A5EE90C8CAE03E4FDA2AD5EE00' then // FluttershyIsBestPony
+  begin
+   WriteLog('Все команды, которые этого требуют, разблокированы!');
+   Unlocked:=True;
+   Exit;
+  end;
+ if Hashed='7B523876DF88129AE460536C2EBB95925450DF5790DE777AEC23D9FDFF1DFE23B2BCC47F608B23E16F85ACFA8CF462D9FE3F6964C1D9F122FA27B575A78DE730' then // IamNotBrony
+  begin
+   WriteLog('Все команды, которые этого требуют, заблокированы!');
+   Unlocked:=False;
+   Exit;
+  end;
+ if Hashed='AFAC327A242E1C0CB01904739B4CC9DEFA318CC1C860038857E2F3E4F8555F7EB0DAA7941975967EAC3089B8A0EC53167893D0A357CD0D8F7EA48733FBCB276F' then // MadTrax
+  begin
+   uFMOD_PlaySong(@xm,Length(xm),XM_MEMORY);
+   WriteLog('Чтобы остановить напиши StopIt');
+   Exit;
+  end;
+ if Hashed='991D289E0F3B3B20E82A4F2AD1C56194A7835192D2F4622069E56018C6A207870664CA67A78D54C70D3D3E26315AE1D2156F61B27A026F660B8B1A9A0936ABDF' then // StopIt
+  begin
+   uFMOD_StopSong;
+   WriteLog('Остановлено');
+   Exit;
+  end;
+ if Hashed='4F38ABABF14D7BA11FB9F6D7AB692A591DCC91D7EFADE8AA535C991A1CBEB24EF1E321832688565A6332171F819B98F04C6160C3E85D1F7BEEE18B88BAF77BD9' then // 4 8 15 16 23 42
+  begin
+   WriteLog('108');
+   Exit;
+  end;
+ if Hashed='3489CC34583826ABA897688CC2972ACF91356C7932FB0209D40385BF18022F91CAE998ADEFC432CB9F79A6D165762FABD0D009ADA1777085FEDAB1423A943B6A' then // APB Reloaded
+  begin
+   WriteLog('108');
+   Exit;
+  end;
+ RawCommand:=Normalize(RawCommand);
+ L:=Length(RawCommand);
+ if L>0 then
+  begin
+   i:=0;
+   repeat
+    i:=i+1;
+   until (RawCommand[i]=' ') or (i=L);
+   MainCommand:=Trim(Copy(RawCommand,1,i));
+   SubCommand:=Trim(Copy(RawCommand,i+1,L-i));
+    C:=SubCommandCount(SubCommand);
+    if C>1 then
+     if ExtSubCommand(SubCommand,C-1)='>' then
+      begin
+       CmdToFileHandler(ExtSubCommand(SubCommand,C) + ' ' + Copy(RawCommand,1,Length(RawCommand)-Length(ExtSubCommand(SubCommand,C))-3));
+       Exit;
+      end
+     else if ExtSubCommand(SubCommand,C-1)='>>' then
+      begin
+       CmdToFile2Handler(ExtSubCommand(SubCommand,C) + ' ' + Copy(RawCommand,1,Length(RawCommand)-Length(ExtSubCommand(SubCommand,C))-4));
+       Exit;
+      end;
+   CommandID:=GetCommandID(LowerCase(MainCommand));
+   if CommandID=-1 then
+    begin
+     WriteLog('Команда "' + MainCommand + '" не существует. Проверьте правильность ввода или воспользуйтесь командой help.');
+    end
+   else if CommandID=-2 then
+    begin
+     WriteLog('Команда "' + MainCommand + '" заблокирована, так как она тебе не нужна. Для разблокировки введи пароль.');
+     WriteLog('Если ты всё же уверен, что она тебе нужна и ты точно знаешь, что хочешь сделать,');
+     WriteLog('то либо ты знаешь пароль, либо сможешь обойти блокировку и без пароля.');
+    end
+   else
+    begin
+     Stats.ConsoleCmdsUsedTimesTotal:=Stats.ConsoleCmdsUsedTimesTotal+1;
+     {if Commands[CommandID].ExternalProc then
+      Commands[CommandID].ExternalHandler(SubCommand)
+     else}
+      Commands[CommandID].Handler(SubCommand);
+    end;
+  end;
+end;
+
+procedure TForm12.ParseCommands(RawCommand:String);
+var
+ i,j:Integer;
+ ecmd:String;
+begin
+ AddHistory(RawCommand);
+ RawCommand:=NormalizeSemicolons(RawCommand);
+ i:=GetRawCommandsCount(RawCommand);
+ if i>0 then
+  for j:= 1 To i Do
+   begin
+    ecmd:=ExtRawCommand(RawCommand,j);
+    if Length(ecmd)>0 then
+     ParseCommand(ecmd);
+   end;
+end;
+
+function TForm12.HistoryAlreadyExists(Cmd:String;var Pos:Byte):Boolean;
+var
+ i:Byte;
+begin
+ Result:=False;
+ if HistoryLength>0 then
+  for i:= 0 To HistoryLength-1 Do
+   if Cmd=CommandsHistory[i] then
+    begin
+     Result:=True;
+     Pos:=i;
+    end;
+end;
+
+procedure TForm12.AddHistory(Cmd:String);
+var
+ i,Pos:Byte;
+begin
+ if ToFileFlag then Exit;
+ if not HistoryAlreadyExists(Cmd,Pos) then
+  begin
+   if HistoryLength<20 then
+    begin
+     HistoryLength:=HistoryLength+1;
+     CommandsHistory[HistoryLength-1]:=Cmd;
+    end
+   else
+    begin
+     for i:= 0 To 18 Do
+      CommandsHistory[i]:=CommandsHistory[i+1];
+     CommandsHistory[19]:=Cmd;
+    end;
+  end
+ else
+  begin
+   if Pos<19 then
+    for i:= Pos To 18 Do
+     CommandsHistory[i]:=CommandsHistory[i+1];
+    CommandsHistory[HistoryLength-1]:=Cmd;
+  end;
+ HistoryPos:=HistoryLength;
+end;
+
+procedure TForm12.NextHistory;
+begin
+ if (HistoryLength>0) and (HistoryPos<HistoryLength-1) then
+  begin
+   HistoryPos:=HistoryPos+1;
+   Edit1.Text:=CommandsHistory[HistoryPos];
+   Edit1.SelStart:=Length(Edit1.Text);
+   Edit1.SelLength:=0;
+  end;
+end;
+
+procedure TForm12.PrevHistory;
+begin
+ if (HistoryLength>0) and (HistoryPos>0) then
+  begin
+   HistoryPos:=HistoryPos-1;
+   Edit1.Text:=CommandsHistory[HistoryPos];
+   Edit1.SelStart:=Length(Edit1.Text);
+   Edit1.SelLength:=0;
+  end;
+end;
+
+procedure TForm12.CommandsAutorun;
+var
+ autorunpath,cmd:String;
+ autorun:TStringList;
+ C,i:Integer;
+begin
+ autorunpath:=ProgDir + 'autorun.txt';
+ if FileExists(autorunpath) then
+  begin
+   autorun:=TStringList.Create;
+   autorun.Clear;
+   autorun.LoadFromFile(autorunpath);
+   C:=autorun.Count;
+   if C>0 then
+    begin
+     Form12.Show;
+     for i:= 0 To C-1 Do
+      begin
+       cmd:=autorun.Strings[i];
+       if LowerCase(cmd)='restart' then
+        WriteLog('Команда restart не работает из автозапуска во избежание бесконечных циклов.')
+       else if LowerCase(cmd)='exit' then
+        WriteLog('Команда exit не работает из автозапуска ибо в этом нет смысла.')
+       else
+        ParseCommands(cmd);
+      end;
+    end;
+  end;
+end;
+
+procedure TForm12.Edit1KeyPress(Sender: TObject; var Key: Char);
+var
+ tmp:String;
+begin
+ TAB_mod:=True;
+ if Key=#13 then
+  begin
+   tmp:=Trim(Edit1.Text);
+   if Length(tmp)>0 then
+    begin
+     Edit1.Clear;
+     ParseCommands(tmp);
+    end;
+   Key:=#0;
+  end;
+end;
+
+procedure TForm12.FormCreate(Sender: TObject);
+var
+ tmp:TSystemInfo;
+ es:TStyles;
+begin
+ SortedCmdList:=TStringList.Create;
+ InitCommands;
+ ToFile:=TStringList.Create;
+ RemakeSortedCmdList;
+ SetLength(es,1);
+ es[0].Start:=16;
+ es[0].Length:=5;
+ es[0].Style:=[fsBold];
+ es[0].Color:=clRed;
+ WriteLogStyleExtended('Консоль ' + CONSOLE_VERSION,es);
+ if IsSchoolboy then
+  begin
+   WriteLog('Детектор определил, что вы, возможно, школьник.');
+   Form1.AddErrorLog('Детектор сообщает о возможном школьнике.');
+  end;
+ Form1.LoadBASSPlugins;
+ if NON_PUBLIC then
+  begin
+   WriteLog('');
+   WriteLogStyle('Эта версия плаира не предназначена для публикации.',[fsBold],clRed);
+   WriteLogStyle('Если она досталась вам по ошибке, сообщите мне пжлст откуда вы её взяли.',[fsBold],clRed);
+   Form1.AddErrorLog('NON PUBLIC VERSION!');
+  end;
+ hashes.HashingCore:=THashingCore.Create;
+ CommandsAutorun;
+ DragAcceptFiles(Form12.Handle,True);
+ GetSystemInfo(tmp);
+ Cores:=tmp.dwNumberOfProcessors;
+ SetLength(WarmingThread,Cores);
+ WriteLog(DEBUG_Params);
+end;
+
+procedure TForm12.Edit1KeyDown(Sender: TObject; var Key: Word;
+  Shift: TShiftState);
+begin
+ if Key=38 then
+  begin
+   PrevHistory;
+   Key:=0;
+  end
+ else if Key=40 then
+  begin
+   NextHistory;
+   Key:=0;
+  end
+ else HistoryPos:=HistoryLength;
+end;
+
+procedure TForm12.Timer1Timer(Sender: TObject);
+begin
+ TimerSeconds:=TimerSeconds-1;
+ if TimerSeconds=0 then
+  begin
+   Timer1.Enabled:=False;
+   if Form1.N17.Checked then Form1.TotalTerminate
+   else Form1.AfterPlaybackStopTask;
+  end;
+end;
+
+procedure TForm12.HTTPSrvCommandGet(AThread: TIdPeerThread;
+  ARequestInfo: TIdHTTPRequestInfo; AResponseInfo: TIdHTTPResponseInfo);
+begin
+ MRCDummy.MainWebFaceHandler(AThread,ARequestInfo,AResponseInfo);
+end;
+
+procedure TForm12.Timer2Timer(Sender: TObject);
+begin
+ TimerSeconds2:=TimerSeconds2-1;
+ if TimerSeconds2=0 then
+  begin
+   Timer2.Enabled:=False;
+   Form1.StopPlaying;
+   Form1.PausePlay;
+  end;
+end;
+
+function WhereIsTheLastSemicolon(str:String):Integer;
+var
+ i,L:Integer;
+begin
+ L:=Length(str);
+ i:=L+1;
+ repeat
+  i:=i-1;
+ until (i=0) or (str[i]=';');
+ Result:=i;
+end;
+
+procedure TForm12.TABCommList;
+var
+ searchStr:String;
+ i,ls:Integer;
+begin
+ if TAB_mod then
+  begin
+   searchStr:=Trim(Edit1.Text);
+   TAB_addition:='';
+   ls:=WhereIsTheLastSemicolon(searchStr);
+   if ls>0 then
+    begin
+     TAB_addition:=Copy(searchStr,1,ls);
+     searchStr:=Trim(Copy(searchStr,ls+1,Length(searchStr)-ls));
+    end;
+   SetLength(TAB_clist,0);
+   for i:= 0 to CommandsCount-1 do
+    if Form2.FindANeedleAtTheBeginningOfHaystack(searchStr,SortedCmdList.Strings[i])<>0 then
+     begin
+      SetLength(TAB_clist,Length(TAB_clist)+1);
+      TAB_clist[Length(TAB_clist)-1]:=SortedCmdList.Strings[i];
+     end;
+   TAB_cur:=0;
+   TAB_mod:=False;
+  end;
+ if Length(TAB_clist)>0 then
+  begin
+   Edit1.Text:=TAB_addition + TAB_clist[TAB_cur] + ' ';
+   Edit1.SelStart:=Length(Edit1.Text);
+   Edit1.SelLength:=0;
+   TAB_cur:=TAB_cur+1;
+   if TAB_cur=Length(TAB_clist) then TAB_cur:=0;
+  end;
+end;
+
+procedure TForm12.AEMessage(var Msg: tagMSG; var Handled: Boolean);
+begin
+ case Msg.message of
+  WM_KEYDOWN:
+   if msg.wParam=VK_TAB then
+    if Edit1.Focused then
+     begin
+      if Length(Trim(Edit1.Text))>0 then TABCommList;
+      Handled:=True;
+     end;
+ end;
+end;
+
+end.

@@ -1,0 +1,21 @@
+object Form9: TForm9
+  Left = 235
+  Top = 300
+  BorderIcons = [biSystemMenu]
+  BorderStyle = bsNone
+  Caption = 'Spectrum'
+  ClientHeight = 127
+  ClientWidth = 368
+  Color = clBlack
+  Font.Charset = DEFAULT_CHARSET
+  Font.Color = clWindowText
+  Font.Height = -11
+  Font.Name = 'MS Sans Serif'
+  Font.Style = []
+  OldCreateOrder = False
+  Position = poScreenCenter
+  OnCreate = FormCreate
+  OnMouseUp = FormMouseUp
+  PixelsPerInch = 96
+  TextHeight = 13
+end

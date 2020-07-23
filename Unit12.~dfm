@@ -1,0 +1,81 @@
+object Form12: TForm12
+  Left = 401
+  Top = 483
+  Width = 689
+  Height = 469
+  BorderIcons = [biSystemMenu, biMaximize]
+  Caption = #1050#1086#1085#1089#1086#1083#1100
+  Color = clBtnFace
+  Font.Charset = RUSSIAN_CHARSET
+  Font.Color = clBlack
+  Font.Height = -11
+  Font.Name = 'Arial'
+  Font.Style = []
+  OldCreateOrder = False
+  Position = poScreenCenter
+  OnCreate = FormCreate
+  DesignSize = (
+    673
+    431)
+  PixelsPerInch = 96
+  TextHeight = 14
+  object Edit1: TEdit
+    Left = 0
+    Top = 410
+    Width = 673
+    Height = 22
+    Anchors = [akLeft, akRight, akBottom]
+    TabOrder = 0
+    OnKeyDown = Edit1KeyDown
+    OnKeyPress = Edit1KeyPress
+  end
+  object Memo1: TRichEdit
+    Left = 0
+    Top = 0
+    Width = 673
+    Height = 409
+    Anchors = [akLeft, akTop, akRight, akBottom]
+    Font.Charset = RUSSIAN_CHARSET
+    Font.Color = clWindowText
+    Font.Height = -13
+    Font.Name = 'Lucida Console'
+    Font.Style = []
+    HideSelection = False
+    ParentFont = False
+    ReadOnly = True
+    ScrollBars = ssBoth
+    TabOrder = 1
+    WantTabs = True
+    WordWrap = False
+  end
+  object Timer1: TTimer
+    Enabled = False
+    OnTimer = Timer1Timer
+    Left = 65512
+    Top = 65512
+  end
+  object HTTPSrv: TIdHTTPServer
+    Bindings = <>
+    CommandHandlers = <>
+    DefaultPort = 5000
+    Greeting.NumericCode = 0
+    MaxConnectionReply.NumericCode = 0
+    ReplyExceptionCode = 0
+    ReplyTexts = <>
+    ReplyUnknownCommand.NumericCode = 0
+    OnCommandGet = HTTPSrvCommandGet
+    Left = 65512
+    Top = 65512
+  end
+  object Timer2: TTimer
+    Enabled = False
+    OnTimer = Timer2Timer
+    Left = 65512
+    Top = 65512
+  end
+  object AE: TApplicationEvents
+    OnMessage = AEMessage
+    Left = 96
+    Top = 160
+  end
+end

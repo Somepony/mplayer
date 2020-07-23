@@ -1,0 +1,19 @@
+object Form4: TForm4
+  Left = 511
+  Top = 162
+  BorderIcons = [biSystemMenu]
+  BorderStyle = bsSingle
+  Caption = #1054#1089#1094#1080#1083#1083#1086#1089#1082#1086#1087
+  ClientHeight = 137
+  ClientWidth = 201
+  Color = clBtnFace
+  Font.Charset = RUSSIAN_CHARSET
+  Font.Color = clBlack
+  Font.Height = -11
+  Font.Name = 'Arial'
+  Font.Style = []
+  OldCreateOrder = False
+  Position = poScreenCenter
+  PixelsPerInch = 96
+  TextHeight = 14
+end
